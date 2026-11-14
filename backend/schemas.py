@@ -68,3 +68,38 @@ class GuardrailsConfig(BaseModel):
     max_autonomous_spend_eur: float = Field(gt=0)
     forbidden_allergens: list[str]
     allow_substitutions: bool
+
+
+class InventoryRule(BaseModel):
+    sku: str
+    name: str
+    product_query: str
+    unit: str = "PCS"
+    current_stock: int = Field(ge=0)
+    min_threshold: int = Field(ge=0)
+    reorder_quantity: int = Field(gt=0)
+    auto_reorder_enabled: bool = True
+    buyer_id: str = "BUYER-TEST-001"
+
+
+class InventoryRulePatch(BaseModel):
+    reorder_quantity: int | None = Field(default=None, gt=0)
+    min_threshold: int | None = Field(default=None, ge=0)
+    current_stock: int | None = Field(default=None, ge=0)
+    auto_reorder_enabled: bool | None = None
+
+
+class InventoryReorderResult(BaseModel):
+    sku: str
+    status: str
+    message: str
+    order: OrderResponse | None = None
+
+
+class InventoryConsumeResponse(BaseModel):
+    item: InventoryRule
+    reorder_result: InventoryReorderResult | None = None
+
+
+class InventoryReorderCheckResponse(BaseModel):
+    results: list[InventoryReorderResult]

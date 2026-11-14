@@ -64,7 +64,8 @@ Gemini API key in the environment where Streamlit runs. The default `OPENAI_BASE
 `https://generativelanguage.googleapis.com/v1beta/openai/`, and the default `OPENAI_MODEL` is
 `gemini-2.5-flash`; set either variable to override it.
 
-On PowerShell, set the key for the current terminal before starting the frontend:
+You can add `OPENAI_API_KEY=your-api-key` to the root `.env` file, which is ignored by Git, or set it
+in PowerShell for the current terminal before starting the frontend:
 
 ```powershell
 $env:OPENAI_API_KEY = "your-gemini-api-key"

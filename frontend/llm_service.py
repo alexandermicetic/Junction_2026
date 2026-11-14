@@ -1,4 +1,4 @@
-"""OpenAI-compatible Chat Completions client used by the purchasing chat UI."""
+"""Small OpenAI Responses API client used by the purchasing chat UI."""
 from __future__ import annotations
 
 import json
