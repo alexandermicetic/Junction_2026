@@ -59,17 +59,19 @@ Our design priorities:
 
 ### Enable the purchasing chatbot
 
-The chatbot uses the OpenAI Responses API. Set `OPENAI_API_KEY` in the environment where Streamlit runs.
-Optionally set `OPENAI_MODEL` to choose another model; the default is `gpt-4.1-mini`.
+The chatbot uses Gemini through its OpenAI-compatible Chat Completions API. Set `OPENAI_API_KEY` to your
+Gemini API key in the environment where Streamlit runs. The default `OPENAI_BASE_URL` is
+`https://generativelanguage.googleapis.com/v1beta/openai/`, and the default `OPENAI_MODEL` is
+`gemini-2.5-flash`; set either variable to override it.
 
 On PowerShell, set the key for the current terminal before starting the frontend:
 
 ```powershell
-$env:OPENAI_API_KEY = "your-api-key"
+$env:OPENAI_API_KEY = "your-gemini-api-key"
 streamlit run frontend/app.py
 ```
 
-The chatbot sends recent conversation messages to OpenAI to answer questions and extract quote requests.
+The chatbot sends recent conversation messages to Gemini to answer questions and extract quote requests.
 Product searches use the local synthetic catalog, and quote details come from the mock backend. The chatbot
 does not submit orders. Keep API keys in environment variables and never commit them.
 
