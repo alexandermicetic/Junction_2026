@@ -1,6 +1,8 @@
 # Backend
 
-Python 3.11+ FastAPI walking skeleton. Data is synthetic and stored in memory; no database or external API is used.
+Python 3.11+ FastAPI gateway. It uses the local product catalog and queries the configured Valio on-demand API for quote prices and availability.
+
+`VALIO_BASE_URL` may be the service root, the `/api` root, or the `/api/ping` health-check URL. The client normalizes these forms before calling `/api/price` and `/api/availability`. Keep `VALIO_API_KEY` in `backend/.env` and never commit it.
 
 ```powershell
 cd backend
