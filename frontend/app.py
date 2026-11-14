@@ -80,7 +80,13 @@ if selected:
 
     with st.form("quote_form"):
         form_cols = st.columns([1, 1, 1, 1.3])
-        quantity = form_cols[0].number_input("Quantity", min_value=0.01, value=1.0, step=1.0)
+        try:
+            lot_step = float(selected.get("allowedLotSize") or 1)
+            if lot_step <= 0:
+                lot_step = 1.0
+        except (TypeError, ValueError):
+            lot_step = 1.0
+        quantity = form_cols[0].number_input("Quantity", min_value=lot_step, value=lot_step, step=lot_step)
         unit = form_cols[1].selectbox("Unit", unit_options)
         delivery_date = form_cols[2].date_input(
             "Required by",
@@ -89,6 +95,14 @@ if selected:
         )
         buyer_id = form_cols[3].text_input("Buyer ID", value="restaurant-001")
         submitted = st.form_submit_button("Get quote", type="primary", use_container_width=True)
+
+    quote_request_key = (
+        str(selected["id"]),
+        float(quantity),
+        unit,
+        delivery_date.isoformat(),
+        buyer_id.strip(),
+    )
 
     if submitted:
         try:
@@ -100,7 +114,7 @@ if selected:
                 max_delivery_date=delivery_date.isoformat(),
             )
             st.session_state["last_quote"] = quote
-            st.session_state["last_quote_product_id"] = str(selected["id"])
+            st.session_state["last_quote_request_key"] = quote_request_key
             st.session_state["last_quote_request"] = {
                 "quantity": quantity,
                 "unit": unit,
@@ -110,8 +124,10 @@ if selected:
         except DataServiceError as exc:
             st.error(str(exc))
 
-    if st.session_state.get("last_quote_product_id") == str(selected["id"]):
+    if st.session_state.get("last_quote_request_key") == quote_request_key:
         quote = st.session_state.get("last_quote")
+    elif st.session_state.get("last_quote") is not None:
+        st.caption("The current selections differ from the last quote. Submit a new request to refresh it.")
 
     if quote:
         request_info = st.session_state.get("last_quote_request", {})
