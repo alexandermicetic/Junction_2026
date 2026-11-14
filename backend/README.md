@@ -13,3 +13,12 @@ uvicorn main:app --reload
 ```
 
 The interactive API documentation is available at <http://127.0.0.1:8000/docs>.
+
+If the backend reports that the imported `jwt` module is not PyJWT, remove the
+conflicting `jwt` distribution and reinstall the required package in the same
+Python environment used to launch Uvicorn:
+
+```powershell
+python -m pip uninstall jwt
+python -m pip install --force-reinstall PyJWT
+```
