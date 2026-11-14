@@ -35,17 +35,17 @@ st.markdown(
 )
 
 
-def parse_chat_request(message: str) -> tuple[float, str, str, date] | None:
+def parse_chat_request(message: str) -> tuple[int, str, str, date] | None:
     """Parse a small, explicit subset of natural-language quantity requests."""
     quantity_match = re.search(
-        r"(?P<quantity>\d[\d,]*(?:\.\d+)?)\s*(?P<unit>litres?|liters?|l\b|kilograms?|kg\b|cases?|packs?|units?)",
+        r"(?P<quantity>\d[\d,]*)\s*(?P<unit>litres?|liters?|l\b|kilograms?|kg\b|cases?|packs?|units?)",
         message,
         re.IGNORECASE,
     )
     if not quantity_match:
         return None
 
-    quantity = float(quantity_match.group("quantity").replace(",", ""))
+    quantity = int(quantity_match.group("quantity").replace(",", ""))
     raw_unit = quantity_match.group("unit").casefold()
     if raw_unit.startswith(("litre", "liter")) or raw_unit == "l":
         unit = "L"
@@ -171,7 +171,10 @@ with search_tab:
         with st.form("catalog_quote_form"):
             form_cols = st.columns([1, 1, 1, 1.2])
             quantity = form_cols[0].number_input(
-                "Quantity", min_value=lot_step, value=lot_step, step=lot_step
+                "Quantity",
+                min_value=max(1, int(lot_step)),
+                value=max(1, int(lot_step)),
+                step=1,
             )
             unit = form_cols[1].selectbox("Unit", unit_options)
             due_date = form_cols[2].date_input(
@@ -395,7 +398,10 @@ with reorder_tab:
                     rule_step = 1.0
                 threshold = st.number_input("Reorder when stock is at or below", min_value=0.0, value=1.0, step=rule_step)
                 reorder_quantity = st.number_input(
-                    "Reorder quantity", min_value=rule_step, value=rule_step, step=rule_step
+                    "Reorder quantity",
+                    min_value=max(1, int(rule_step)),
+                    value=max(1, int(rule_step)),
+                    step=1,
                 )
                 rule_buyer = st.text_input("Buyer ID", value="restaurant-001")
                 rule_days = st.number_input("Days until required delivery", min_value=0, value=3, step=1)
