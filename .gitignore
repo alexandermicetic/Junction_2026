@@ -33,3 +33,7 @@ htmlcov/
 # OS files
 .DS_Store
 Thumbs.db
+
+backend/data/product_data_readable.json
+
+backend/data/product_data_readable.json
