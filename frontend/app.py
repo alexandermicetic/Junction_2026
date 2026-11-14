@@ -1,7 +1,6 @@
 """English Streamlit purchasing UI, chat quote flow, and reorder-rule prototype."""
 from __future__ import annotations
 
-import re
 from datetime import date, timedelta
 
 import streamlit as st
@@ -16,6 +15,7 @@ from data_service import (
     get_products,
     update_guardrails,
 )
+from llm_service import LLMServiceError, get_chat_response
 
 st.set_page_config(page_title="Valio Aimo | Purchasing", page_icon="🥛", layout="wide")
 st.markdown(
@@ -33,63 +33,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
-
-def parse_chat_request(message: str) -> tuple[int, str, str, date] | None:
-    """Parse a small, explicit subset of natural-language quantity requests."""
-    quantity_match = re.search(
-        r"(?P<quantity>\d[\d,]*)\s*(?P<unit>litres?|liters?|l\b|kilograms?|kg\b|cases?|packs?|units?)",
-        message,
-        re.IGNORECASE,
-    )
-    if not quantity_match:
-        return None
-
-    quantity = int(quantity_match.group("quantity").replace(",", ""))
-    raw_unit = quantity_match.group("unit").casefold()
-    if raw_unit.startswith(("litre", "liter")) or raw_unit == "l":
-        unit = "L"
-    elif raw_unit.startswith("kilogram") or raw_unit == "kg":
-        unit = "KG"
-    elif raw_unit.startswith("case"):
-        unit = "CASE"
-    elif raw_unit.startswith("pack"):
-        unit = "PACK"
-    else:
-        unit = "unit"
-
-    product_match = re.search(
-        r"\bof\s+(.+?)(?=\s+\b(?:by|before|on)\b|[?.!,]|$)",
-        message,
-        re.IGNORECASE,
-    )
-    if product_match:
-        product_query = product_match.group(1).strip()
-    else:
-        product_query = re.sub(
-            r"\b(?:i need|please find|find|order)\b",
-            "",
-            message,
-            flags=re.IGNORECASE,
-        )
-        product_query = re.sub(quantity_match.group(0), "", product_query).strip(" .,?!")
-
-    due_match = re.search(
-        r"\bby\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
-        message,
-        re.IGNORECASE,
-    )
-    if due_match:
-        weekday_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-        target_weekday = weekday_names.index(due_match.group(1).casefold())
-        days_ahead = (target_weekday - date.today().weekday()) % 7
-        due_date = date.today() + timedelta(days=days_ahead or 7)
-    else:
-        due_date = date.today() + timedelta(days=3)
-
-    if not product_query:
-        return None
-    return quantity, unit, product_query, due_date
 
 
 def quote_summary(quote: dict) -> str:
@@ -240,8 +183,8 @@ with search_tab:
 with chat_tab:
     st.subheader("Purchasing assistant")
     st.caption(
-        "This frontend prototype parses quantity, unit, product, and weekday from a request, "
-        "then searches the catalog and requests a quote. It does not use an LLM."
+        "An OpenAI language model handles conversation and extracts quote requests. Product matching and "
+        "quotes still use the local catalog and synthetic backend; this chat cannot place orders."
     )
     if "chat_messages" not in st.session_state:
         st.session_state["chat_messages"] = [
@@ -261,51 +204,75 @@ with chat_tab:
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            parsed = parse_chat_request(prompt)
-            if parsed is None:
-                reply = "Please include a quantity and unit, such as “1,000 litres”."
-                st.markdown(reply)
-            else:
-                quantity, unit, product_query, due_date = parsed
-                try:
-                    matches = get_products(product_query, limit=5)
-                except (OSError, ValueError) as exc:
-                    matches = []
-                    reply = f"I could not search the product catalog: {exc}"
+            reply = "I could not process that message. Please try again."
+            try:
+                assistant_result = get_chat_response(
+                    st.session_state["chat_messages"], today=date.today().isoformat()
+                )
+                reply = str(assistant_result.get("reply") or "How can I help with your purchasing request?")
+                if assistant_result["intent"] == "quote":
+                    quantity = assistant_result.get("quantity")
+                    unit = assistant_result.get("unit")
+                    product_query = assistant_result.get("product_query")
+                    if not (type(quantity) is int and 1 <= quantity <= 1_000_000):
+                        reply = "Please provide a positive whole-number quantity."
+                    elif not isinstance(unit, str) or not unit.strip():
+                        reply = reply or "Which unit should I use for that quantity?"
+                    elif not isinstance(product_query, str) or not product_query.strip():
+                        reply = reply or "Which product would you like a quote for?"
+                    else:
+                        unit = unit.strip()[:40]
+                        product_query = product_query.strip()[:200]
+                        raw_due_date = assistant_result.get("delivery_date")
+                        try:
+                            due_date = date.fromisoformat(raw_due_date) if raw_due_date else date.today() + timedelta(days=3)
+                        except (TypeError, ValueError):
+                            due_date = date.today() - timedelta(days=1)
+                        if due_date < date.today():
+                            reply = "Please provide a delivery date that is today or later."
+                        else:
+                            try:
+                                matches = get_products(product_query, limit=5)
+                            except (OSError, ValueError) as exc:
+                                matches = []
+                                reply = f"I could not search the product catalog: {exc}"
 
-                if not matches and not catalog_error:
-                    reply = (
-                        f'I could not find a catalog match for “{product_query}”. '
-                        "Try a shorter product name or a product ID."
-                    )
-                elif matches:
-                    try:
-                        quote = create_quote(
-                            buyer_id="restaurant-001",
-                            product_query=product_query,
-                            quantity=quantity,
-                            unit=unit,
-                            max_delivery_date=due_date.isoformat(),
-                        )
-                        st.session_state["chat_quote"] = quote
-                        st.session_state["chat_quote_context"] = {
-                            "query": product_query,
-                            "quantity": quantity,
-                            "unit": unit,
-                            "date": due_date.isoformat(),
-                            "matches": [item["displayName"] for item in matches],
-                        }
-                        reply = (
-                            f'I found {len(matches)} catalog match(es), including '
-                            f'“{matches[0]["displayName"]}”. {quote_summary(quote)} '
-                            "The quote endpoint currently returns fixed demo milk items, so check that they match your request."
-                        )
-                    except DataServiceError as exc:
-                        reply = f"I could not retrieve a quote: {exc}"
-                elif catalog_error:
-                    reply = f"The product catalog is unavailable: {catalog_error}"
+                            if not matches:
+                                if catalog_error:
+                                    reply = f"The product catalog is unavailable: {catalog_error}"
+                                else:
+                                    reply = (
+                                        f'I could not find a catalog match for "{product_query}". '
+                                        "Try a shorter product name or a product ID."
+                                    )
+                            else:
+                                try:
+                                    quote = create_quote(
+                                        buyer_id="restaurant-001",
+                                        product_query=product_query,
+                                        quantity=quantity,
+                                        unit=unit,
+                                        max_delivery_date=due_date.isoformat(),
+                                    )
+                                    st.session_state["chat_quote"] = quote
+                                    st.session_state["chat_quote_context"] = {
+                                        "query": product_query,
+                                        "quantity": quantity,
+                                        "unit": unit,
+                                        "date": due_date.isoformat(),
+                                        "matches": [item["displayName"] for item in matches],
+                                    }
+                                    reply = (
+                                        f'I found {len(matches)} catalog match(es), including '
+                                        f'"{matches[0]["displayName"]}". {quote_summary(quote)} '
+                                        "The quote endpoint currently returns fixed demo milk items, so check that they match your request."
+                                    )
+                                except DataServiceError as exc:
+                                    reply = f"I could not retrieve a quote: {exc}"
+            except LLMServiceError as exc:
+                reply = str(exc)
 
-                st.markdown(reply)
+            st.markdown(reply)
         st.session_state["chat_messages"].append({"role": "assistant", "content": reply})
 
     chat_quote = st.session_state.get("chat_quote")
