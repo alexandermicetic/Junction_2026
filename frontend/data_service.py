@@ -1,28 +1,25 @@
-"""Read the Junction 2026 mock datasets from the repository.
-
-The checked-in repository currently contains a product *schema*, but no product
-records, price list, or availability feed. This module reports those missing
-sources explicitly instead of fabricating commercial data.
-"""
+"""Read local comparison datasets and call the synthetic FastAPI quote API."""
 from __future__ import annotations
 
 import csv
 import json
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = REPO_ROOT / "backend" / "data"
 PRODUCTS_FILE = DATA_DIR / "valio_aimo_junction26_product_data.json"
 CARBON_FILE = DATA_DIR / "valio_aimo_junction26_carbon_footprint.csv"
 DELIVERY_FILE = DATA_DIR / "valio_aimo_junction26_delivery_reliability.csv"
-PRICE_FILE = DATA_DIR / "valio_aimo_junction26_prices.csv"
-AVAILABILITY_FILE = DATA_DIR / "valio_aimo_junction26_availability.csv"
+API_BASE_URL = os.getenv("VALIO_AIMO_API_URL", "http://127.0.0.1:8000").rstrip("/")
 
 
-class DataSourceUnavailable(RuntimeError):
-    """Raised when a requested mock-data source is not present."""
+class DataServiceError(RuntimeError):
+    """Raised when a mock data source or backend API cannot be used."""
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:
@@ -47,8 +44,7 @@ def _products() -> tuple[dict[str, Any], ...]:
 def _carbon_by_product() -> dict[str, float]:
     result: dict[str, float] = {}
     for row in _read_csv(CARBON_FILE):
-        product_id = row.get("productId")
-        value = row.get("AVG kg CO2-eq/kg")
+        product_id, value = row.get("productId"), row.get("AVG kg CO2-eq/kg")
         if product_id and value:
             try:
                 result[product_id] = float(value)
@@ -61,8 +57,7 @@ def _carbon_by_product() -> dict[str, float]:
 def _reliability_by_product() -> dict[str, float]:
     result: dict[str, float] = {}
     for row in _read_csv(DELIVERY_FILE):
-        product_id = row.get("productId")
-        value = row.get("deliveryReliability")
+        product_id, value = row.get("productId"), row.get("deliveryReliability")
         if product_id and value:
             try:
                 result[product_id] = float(value)
@@ -73,18 +68,25 @@ def _reliability_by_product() -> dict[str, float]:
 
 def _product_name(product: dict[str, Any]) -> str:
     names = (product.get("synkkaData") or {}).get("names") or []
-    preferred = sorted(names, key=lambda item: {"fi": 0, "en": 1, "sv": 2}.get(item.get("language"), 3))
-    return next((item.get("value", "") for item in preferred if item.get("value")), product.get("id", "Tuntematon tuote"))
+    preferred = sorted(names, key=lambda item: {"en": 0, "fi": 1, "sv": 2}.get(item.get("language"), 3))
+    return next(
+        (item.get("value", "") for item in preferred if item.get("value")),
+        str(product.get("id", "Unknown product")),
+    )
 
 
 def get_products(query: str = "", limit: int = 100) -> list[dict[str, Any]]:
-    """Search product records by name, brand, supplier or product code."""
+    """Search local product records by name, brand, supplier, or product code."""
     needle = query.strip().casefold()
     results: list[dict[str, Any]] = []
     for product in _products():
         searchable = " ".join(
-            [str(product.get("id", "")), str(product.get("vendorName", "")),
-             str((product.get("synkkaData") or {}).get("brand", "")), _product_name(product)]
+            [
+                str(product.get("id", "")),
+                str(product.get("vendorName", "")),
+                str((product.get("synkkaData") or {}).get("brand", "")),
+                _product_name(product),
+            ]
         ).casefold()
         if needle and needle not in searchable:
             continue
@@ -94,62 +96,77 @@ def get_products(query: str = "", limit: int = 100) -> list[dict[str, Any]]:
     return results
 
 
-def get_product(product_id: str) -> dict[str, Any] | None:
-    """Return one product record by its catalog id."""
-    return next((product for product in get_products(limit=1_000_000) if str(product.get("id")) == str(product_id)), None)
-
-
-def get_price(product_id: str, quantity: float = 1) -> dict[str, Any]:
-    """Return the price record if a price feed is added; never estimate a price."""
-    if not PRICE_FILE.is_file():
-        return {"productId": product_id, "quantity": quantity, "price": None,
-                "available": None, "source": None, "sourceStatus": "missing",
-                "message": "Hintatietoa ei ole mukana nykyisessä mock-datassa."}
-    raise DataSourceUnavailable(
-        f"Hintatiedosto {PRICE_FILE.name} löytyi, mutta sille ei ole skeemaa tai API-määrittelyä."
+def create_quote(
+    buyer_id: str,
+    product_query: str,
+    quantity: float,
+    unit: str,
+    max_delivery_date: str,
+) -> dict[str, Any]:
+    """Request a quote using the request and response models in backend/schemas.py."""
+    payload = {
+        "buyer_id": buyer_id,
+        "items": [
+            {
+                "product_query": product_query,
+                "quantity": quantity,
+                "unit": unit,
+                "max_delivery_date": max_delivery_date,
+            }
+        ],
+    }
+    request = Request(
+        f"{API_BASE_URL}/api/quote",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
     )
-
-
-def get_availability(product_id: str, quantity: float = 1) -> dict[str, Any]:
-    """Return availability if a stock feed is added; never infer stock from other data."""
-    if not AVAILABILITY_FILE.is_file():
-        return {"productId": product_id, "quantity": quantity, "available": None,
-                "availableQuantity": None, "source": None,
-                "message": "Varastosaatavuustietoa ei ole mukana nykyisessä mock-datassa."}
-    raise DataSourceUnavailable(
-        f"Saatavuustiedostolle {AVAILABILITY_FILE.name} ei ole skeemaa tai API-määrittelyä."
-    )
+    try:
+        with urlopen(request, timeout=10) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        try:
+            detail = json.loads(exc.read().decode("utf-8")).get("detail", str(exc))
+        except (ValueError, AttributeError):
+            detail = str(exc)
+        raise DataServiceError(f"Quote API returned HTTP {exc.code}: {detail}") from exc
+    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise DataServiceError(
+            f"Could not reach the mock API at {API_BASE_URL}. Start the backend and try again. ({exc})"
+        ) from exc
 
 
 def get_carbon_footprint(product_id: str) -> float | None:
-    """Return the dataset's carbon intensity in kg CO2-eq per kg of product."""
+    """Return kg CO2-eq per kg of product from the provided CSV."""
     return _carbon_by_product().get(str(product_id))
 
 
 def get_delivery_reliability(product_id: str) -> float | None:
-    """Return the dataset's delivery reliability as a fraction from 0 to 1."""
+    """Return delivery reliability as a fraction from 0 to 1."""
     return _reliability_by_product().get(str(product_id))
 
 
 def get_comparison_data() -> list[dict[str, Any]]:
-    """Join carbon and delivery CSV rows by productId for comparison."""
+    """Join carbon footprint and delivery reliability records by productId."""
     carbon = _carbon_by_product()
     reliability = _reliability_by_product()
     product_names = {str(p.get("id")): _product_name(p) for p in _products()}
     return [
-        {"productId": product_id, "productName": product_names.get(product_id, product_id),
-         "carbonKgCo2EqPerKg": footprint, "deliveryReliability": reliability[product_id]}
+        {
+            "productId": product_id,
+            "productName": product_names.get(product_id, product_id),
+            "carbonKgCo2EqPerKg": footprint,
+            "deliveryReliability": reliability[product_id],
+        }
         for product_id, footprint in carbon.items()
         if product_id in reliability
     ]
 
 
 def get_data_status() -> dict[str, bool]:
-    """Report the availability of each input data file."""
+    """Report which local datasets are available."""
     return {
-        "Tuotetietueet (JSON)": PRODUCTS_FILE.is_file(),
-        "Hintatiedot (CSV)": PRICE_FILE.is_file(),
-        "Varastosaatavuus (CSV)": AVAILABILITY_FILE.is_file(),
-        "Hiilijalanjälki (CSV)": CARBON_FILE.is_file(),
-        "Toimitusvarmuus (CSV)": DELIVERY_FILE.is_file(),
+        "Product records (JSON)": PRODUCTS_FILE.is_file(),
+        "Carbon footprint (CSV)": CARBON_FILE.is_file(),
+        "Delivery reliability (CSV)": DELIVERY_FILE.is_file(),
     }
