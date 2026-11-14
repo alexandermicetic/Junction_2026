@@ -436,7 +436,6 @@ with reorder_tab:
                     elif st.session_state.get("reorder_triggered"):
                         st.warning("This low-stock event has already been handled. Raise stock above the threshold to re-arm the rule.")
                     else:
-                        st.session_state["reorder_triggered"] = True
                         st.warning("Low-stock threshold reached. Checking a quote against the saved purchasing limits.")
                         try:
                             quote = create_quote(
@@ -452,7 +451,12 @@ with reorder_tab:
                                 reasons.append("The quote contains no items.")
                             if any(not item.get("in_stock", False) for item in items):
                                 reasons.append("One or more quoted items are not in stock.")
-                            total = float(quote.get("total_eur", 0))
+                            total_value = quote.get("total_eur")
+                            if total_value is None:
+                                reasons.append("The quote did not include a total.")
+                                total = 0.0
+                            else:
+                                total = float(total_value)
                             if total > float(guardrails["max_autonomous_spend_eur"]):
                                 reasons.append(
                                     f'The quote total (€{total:,.2f}) exceeds the automatic spend limit '
@@ -472,9 +476,12 @@ with reorder_tab:
                             ):
                                 reasons.append("The quote includes a substitute, and substitutions are disabled.")
 
+                            if not quote.get("signed_quote_token"):
+                                reasons.append("The quote did not include a signed quote token.")
                             if reasons:
                                 st.error("No order was submitted. " + " ".join(reasons))
                             else:
+                                st.session_state["reorder_triggered"] = True
                                 order = create_order(rule["buyer_id"], quote["signed_quote_token"])
                                 st.write(f'Order request status: **{order.get("status", "Unknown")}**')
                                 st.write(f'Order ID: {order.get("order_id", "Not provided")}')
@@ -486,6 +493,7 @@ with reorder_tab:
                                 elif order.get("status") == "CONFIRMED":
                                     st.success("The backend confirmed the order.")
                         except (DataServiceError, KeyError, TypeError, ValueError) as exc:
+                            st.session_state["reorder_triggered"] = False
                             st.error(f"Could not complete the reorder check: {exc}")
     else:
         st.info("The backend did not return purchasing limits.")
