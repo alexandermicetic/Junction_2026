@@ -2,8 +2,8 @@
 
 from mcp.server.fastmcp import FastMCP
 
-from main import create_order, create_quote
-from schemas import OrderCreateRequest, QuoteItemRequest, QuoteRequest
+from main import check_inventory_reorder, create_order, create_quote, get_inventory_rules, patch_inventory_rule
+from schemas import InventoryRulePatch, OrderCreateRequest, QuoteItemRequest, QuoteRequest
 
 
 mcp = FastMCP("Valio Aimo Trusted Trade Gateway")
@@ -45,6 +45,34 @@ async def submit_guarded_order(buyer_id: str, signed_quote_token: str) -> dict:
     request = OrderCreateRequest(buyer_id=buyer_id, signed_quote_token=signed_quote_token)
     response = await create_order(request)
     return response.model_dump()
+
+
+@mcp.tool()
+def get_inventory_status() -> list[dict]:
+    """Inspect inventory levels, reorder thresholds, quantities, and auto-reorder settings."""
+    return [item.model_dump() for item in get_inventory_rules()]
+
+
+@mcp.tool()
+def update_reorder_settings(
+    sku: str,
+    reorder_quantity: int | None = None,
+    min_threshold: int | None = None,
+    auto_reorder_enabled: bool | None = None,
+) -> dict:
+    """Update an item's reorder quantity, stock threshold, or automatic reorder setting."""
+    request = InventoryRulePatch(
+        reorder_quantity=reorder_quantity,
+        min_threshold=min_threshold,
+        auto_reorder_enabled=auto_reorder_enabled,
+    )
+    return patch_inventory_rule(sku, request).model_dump()
+
+
+@mcp.tool()
+async def run_auto_reorder_check() -> dict:
+    """Scan inventory and submit signed, guardrail-checked orders for eligible low-stock items."""
+    return (await check_inventory_reorder()).model_dump()
 
 
 if __name__ == "__main__":
