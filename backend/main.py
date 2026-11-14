@@ -85,3 +85,10 @@ def get_guardrails() -> GuardrailsConfig:
 def update_guardrails(config: GuardrailsConfig) -> GuardrailsConfig:
     """Persist updated purchasing guardrails for future order evaluations."""
     return database.save_guardrails(config)
+
+
+@app.post("/api/demo/reset", tags=["Demo"])
+def reset_demo() -> dict[str, str]:
+    """Clear demo state and restore the default purchasing guardrails."""
+    database.reset_demo()
+    return {"status": "reset_complete"}

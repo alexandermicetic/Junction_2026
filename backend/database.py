@@ -9,6 +9,7 @@ from typing import Any
 from schemas import AuditLogEntry, GuardrailsConfig, OrderResponse, QuotedProduct
 
 DB_PATH = Path(__file__).resolve().parent / "valio_gateway.db"
+DEFAULT_GUARDRAILS = GuardrailsConfig(max_autonomous_spend_eur=500.0, forbidden_allergens=["lactose"], allow_substitutions=True)
 
 
 def _connect() -> sqlite3.Connection:
@@ -38,6 +39,17 @@ def save_guardrails(config: GuardrailsConfig) -> GuardrailsConfig:
     with _connect() as db:
         db.execute("UPDATE guardrails SET max_autonomous_spend_eur=?, forbidden_allergens=?, allow_substitutions=? WHERE id=1", (config.max_autonomous_spend_eur, json.dumps(config.forbidden_allergens), int(config.allow_substitutions)))
     return config
+
+
+def reset_demo() -> None:
+    """Clear demo orders and audit logs and restore the default guardrails."""
+    with _connect() as db:
+        db.execute("DELETE FROM audit_logs")
+        db.execute("DELETE FROM orders")
+        db.execute(
+            "UPDATE guardrails SET max_autonomous_spend_eur=?, forbidden_allergens=?, allow_substitutions=? WHERE id=1",
+            (DEFAULT_GUARDRAILS.max_autonomous_spend_eur, json.dumps(DEFAULT_GUARDRAILS.forbidden_allergens), int(DEFAULT_GUARDRAILS.allow_substitutions)),
+        )
 
 
 def save_order(order: OrderResponse, quote_token: str) -> None:
