@@ -66,10 +66,12 @@ if products:
     )
     selected = options[selected_id]
 else:
-    st.warning(
-        "No matching product records were found. Check that "
-        "backend/data/valio_aimo_junction26_product_data.json is present and that the search is not too specific."
-    )
+    if not status["Product records (JSON)"]:
+        st.warning(
+            "The product catalog file backend/data/valio_aimo_junction26_product_data.json is missing."
+        )
+    else:
+        st.info("No products match this search. Try a different name, brand, supplier, or product ID.")
 
 st.subheader("2 · Request price and availability")
 quote = None
