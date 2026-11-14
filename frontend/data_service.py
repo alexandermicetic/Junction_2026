@@ -174,7 +174,7 @@ def get_delivery_reliability(product_id: str) -> float | None:
 
 
 def get_comparison_data() -> list[dict[str, Any]]:
-    """Join carbon footprint and delivery reliability records by productId."""
+    """Join carbon and delivery records without dropping products with missing metrics."""
     carbon = _carbon_by_product()
     reliability = _reliability_by_product()
     product_names = {str(p.get("id")): _product_name(p) for p in _products()}
@@ -182,11 +182,10 @@ def get_comparison_data() -> list[dict[str, Any]]:
         {
             "productId": product_id,
             "productName": product_names.get(product_id, product_id),
-            "carbonKgCo2EqPerKg": footprint,
-            "deliveryReliability": reliability[product_id],
+            "carbonKgCo2EqPerKg": carbon.get(product_id),
+            "deliveryReliability": reliability.get(product_id),
         }
-        for product_id, footprint in carbon.items()
-        if product_id in reliability
+        for product_id in sorted(set(carbon) | set(reliability))
     ]
 
 

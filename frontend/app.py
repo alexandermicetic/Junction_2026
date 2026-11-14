@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from statistics import median
 
 import streamlit as st
+import plotly.express as px
 
 from data_service import (
     DataServiceError,
@@ -473,39 +475,193 @@ with reorder_tab:
         st.info("The backend did not return purchasing limits.")
 
 with compare_tab:
-    st.subheader("Carbon footprint and delivery reliability")
+    st.subheader("Product sustainability")
     st.caption(
-        "This chart joins the two repository CSV files by product ID. Carbon footprint is kg CO₂-equivalent per kg; "
-        "delivery reliability is shown as a percentage."
+        "Compare product carbon footprints with delivery reliability to spot options that balance lower impact "
+        "and dependable supply. Lower CO₂e and higher delivery reliability are preferable."
     )
+
     comparison = get_comparison_data()
     if comparison:
-        left, right = st.columns([1.2, 1])
-        with left:
-            st.markdown("#### Product comparison")
-            st.scatter_chart(
-                comparison,
+        carbon_values = [
+            row["carbonKgCo2EqPerKg"]
+            for row in comparison
+            if row["carbonKgCo2EqPerKg"] is not None
+        ]
+        reliability_values = [
+            row["deliveryReliability"]
+            for row in comparison
+            if row["deliveryReliability"] is not None
+        ]
+        carbon_midpoint = median(carbon_values) if carbon_values else None
+        reliability_midpoint = median(reliability_values) if reliability_values else None
+
+        classified_rows = []
+        for row in comparison:
+            carbon = row["carbonKgCo2EqPerKg"]
+            reliability = row["deliveryReliability"]
+            if carbon is None or reliability is None:
+                performance_class = "Insufficient data"
+            else:
+                lower_footprint = carbon_midpoint is not None and carbon <= carbon_midpoint
+                higher_reliability = reliability_midpoint is not None and reliability >= reliability_midpoint
+                if lower_footprint and higher_reliability:
+                    performance_class = "Optimal"
+                elif lower_footprint or higher_reliability:
+                    performance_class = "Balanced"
+                else:
+                    performance_class = "Needs improvement"
+            classified_rows.append(
+                {
+                    **row,
+                    "performanceClass": performance_class,
+                    "deliveryReliabilityPct": reliability * 100 if reliability is not None else None,
+                }
+            )
+
+        include_missing_carbon = bool(
+            st.session_state.get("sustainability_include_missing_carbon", False)
+        )
+        product_search = str(st.session_state.get("sustainability_search", "")).strip().casefold()
+
+        visible_rows = [
+            row
+            for row in classified_rows
+            if (include_missing_carbon or row["carbonKgCo2EqPerKg"] is not None)
+            and (
+                not product_search
+                or product_search in str(row["productName"]).casefold()
+                or product_search in str(row["productId"]).casefold()
+            )
+        ]
+        visible_carbon = [
+            row["carbonKgCo2EqPerKg"]
+            for row in visible_rows
+            if row["carbonKgCo2EqPerKg"] is not None
+        ]
+        visible_reliability = [
+            row["deliveryReliability"]
+            for row in visible_rows
+            if row["deliveryReliability"] is not None
+        ]
+        optimal_count = sum(row["performanceClass"] == "Optimal" for row in visible_rows)
+
+        kpis = st.columns(4)
+        kpis[0].metric("Products", f"{len(visible_rows):,}")
+        kpis[1].metric(
+            "Average CO₂e",
+            f"{sum(visible_carbon) / len(visible_carbon):.2f} kg CO₂e/kg"
+            if visible_carbon
+            else "—",
+        )
+        kpis[2].metric(
+            "Average delivery reliability",
+            f"{sum(visible_reliability) / len(visible_reliability):.1%}" if visible_reliability else "—",
+        )
+        kpis[3].metric(
+            "Optimal products",
+            f"{optimal_count:,}",
+            help=(
+                "Products with CO₂e at or below the full-dataset median and delivery reliability "
+                "at or above its median."
+            ),
+        )
+        st.caption(
+            "KPIs and the table follow the active filters. Classes use full-dataset medians: Optimal meets both "
+            "benchmarks, Balanced meets one, and Needs improvement meets neither."
+        )
+
+        filter_cols = st.columns([1, 1.8])
+        filter_cols[0].checkbox(
+            "Include products without CO₂e data",
+            key="sustainability_include_missing_carbon",
+        )
+        filter_cols[1].text_input(
+            "Search products", placeholder="Product name or ID", key="sustainability_search"
+        )
+
+        chart_rows = [
+            row for row in visible_rows
+            if row["carbonKgCo2EqPerKg"] is not None and row["deliveryReliability"] is not None
+        ]
+        if chart_rows:
+            chart = px.scatter(
+                chart_rows,
                 x="carbonKgCo2EqPerKg",
-                y="deliveryReliability",
-                x_label="Carbon footprint (kg CO₂-eq / kg)",
-                y_label="Delivery reliability (0–1)",
-                alt="Carbon footprint versus delivery reliability for products with both measurements.",
+                y="deliveryReliabilityPct",
+                color="performanceClass",
+                color_discrete_map={
+                    "Optimal": "#10B981",
+                    "Balanced": "#3B82F6",
+                    "Needs improvement": "#F97316",
+                },
+                hover_name="productName",
+                hover_data={
+                    "productId": True,
+                    "carbonKgCo2EqPerKg": ":.2f",
+                    "deliveryReliabilityPct": ":.1f",
+                    "performanceClass": True,
+                },
+                labels={
+                    "carbonKgCo2EqPerKg": "Carbon footprint (kg CO₂e / kg)",
+                    "deliveryReliabilityPct": "Delivery reliability (%)",
+                    "performanceClass": "Performance class",
+                    "productId": "Product ID",
+                },
             )
-            st.caption("Lower carbon footprint and higher delivery reliability are preferable.")
-        with right:
-            st.markdown("#### Product indicators")
-            st.dataframe(
-                [
-                    {
-                        "Product": row["productName"],
-                        "Product ID": row["productId"],
-                        "kg CO₂-eq / kg": row["carbonKgCo2EqPerKg"],
-                        "Delivery reliability": f'{row["deliveryReliability"]:.1%}',
-                    }
-                    for row in comparison
-                ],
-                hide_index=True,
-                use_container_width=True,
+            chart.update_traces(
+                marker={"size": 11, "opacity": 0.85, "line": {"width": 1, "color": "white"}}
             )
+            chart.update_xaxes(showgrid=True, gridcolor="rgba(148, 163, 184, 0.18)", zeroline=False)
+            chart.update_yaxes(
+                range=[0, 100],
+                tick0=0,
+                dtick=20,
+                ticksuffix="%",
+                showgrid=True,
+                gridcolor="rgba(148, 163, 184, 0.18)",
+                zeroline=False,
+            )
+            chart.update_layout(
+                height=460,
+                plot_bgcolor="rgba(0, 0, 0, 0)",
+                paper_bgcolor="rgba(0, 0, 0, 0)",
+                margin={"l": 16, "r": 16, "t": 24, "b": 12},
+                legend_title_text="Performance class",
+            )
+            st.plotly_chart(chart, use_container_width=True, config={"displayModeBar": False})
+        elif visible_rows:
+            st.info("No visible products have both a CO₂e value and delivery reliability for the chart.")
+        else:
+            st.info("No products match these filters.")
+
+        st.markdown("#### Product indicators")
+        indicator_rows = [
+            {
+                "Product": row["productName"],
+                "Performance class": row["performanceClass"],
+                "kg CO₂-eq / kg": row["carbonKgCo2EqPerKg"],
+                "Delivery reliability": (
+                    row["deliveryReliabilityPct"] if row["deliveryReliabilityPct"] is not None else None
+                ),
+            }
+            for row in visible_rows
+        ]
+        st.dataframe(
+            indicator_rows,
+            column_order=["Product", "Performance class", "kg CO₂-eq / kg", "Delivery reliability"],
+            column_config={
+                "Product": st.column_config.TextColumn("Product", width="large"),
+                "Performance class": st.column_config.TextColumn("Class", width="medium"),
+                "kg CO₂-eq / kg": st.column_config.NumberColumn(
+                    "kg CO₂e / kg", format="%.2f", width="small"
+                ),
+                "Delivery reliability": st.column_config.ProgressColumn(
+                    "Delivery reliability", min_value=0, max_value=100, format="%.0f%%", width="medium"
+                ),
+            },
+            hide_index=True,
+            use_container_width=True,
+        )
     else:
-        st.warning("The carbon footprint and delivery reliability datasets have no product IDs in common.")
+        st.warning("No product records are available for the sustainability comparison.")
