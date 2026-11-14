@@ -57,7 +57,21 @@ Our design priorities:
 
 ## Getting started
 
-*Setup instructions will be added once the initial implementation is ready.*
+### Enable the purchasing chatbot
+
+The chatbot uses the OpenAI Responses API. Set `OPENAI_API_KEY` in the environment where Streamlit runs.
+Optionally set `OPENAI_MODEL` to choose another model; the default is `gpt-4.1-mini`.
+
+On PowerShell, set the key for the current terminal before starting the frontend:
+
+```powershell
+$env:OPENAI_API_KEY = "your-api-key"
+streamlit run frontend/app.py
+```
+
+The chatbot sends recent conversation messages to OpenAI to answer questions and extract quote requests.
+Product searches use the local synthetic catalog, and quote details come from the mock backend. The chatbot
+does not submit orders. Keep API keys in environment variables and never commit them.
 
 ## Project structure
 
