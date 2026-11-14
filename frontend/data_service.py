@@ -1,4 +1,4 @@
-"""Read local comparison datasets and call the synthetic FastAPI quote API."""
+"""Read mock datasets and call the synthetic FastAPI purchasing API."""
 from __future__ import annotations
 
 import csv
@@ -20,6 +20,29 @@ API_BASE_URL = os.getenv("VALIO_AIMO_API_URL", "http://127.0.0.1:8000").rstrip("
 
 class DataServiceError(RuntimeError):
     """Raised when a mock data source or backend API cannot be used."""
+
+
+def _request_json(path: str, *, method: str = "GET", payload: dict[str, Any] | None = None) -> Any:
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = Request(
+        f"{API_BASE_URL}{path}",
+        data=body,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method=method,
+    )
+    try:
+        with urlopen(request, timeout=10) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        try:
+            detail = json.loads(exc.read().decode("utf-8")).get("detail", str(exc))
+        except (ValueError, AttributeError):
+            detail = str(exc)
+        raise DataServiceError(f"{method} {path} returned HTTP {exc.code}: {detail}") from exc
+    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise DataServiceError(
+            f"Could not reach the mock API at {API_BASE_URL}. Start the backend and try again. ({exc})"
+        ) from exc
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:
@@ -103,37 +126,41 @@ def create_quote(
     unit: str,
     max_delivery_date: str,
 ) -> dict[str, Any]:
-    """Request a quote using the request and response models in backend/schemas.py."""
-    payload = {
-        "buyer_id": buyer_id,
-        "items": [
-            {
-                "product_query": product_query,
-                "quantity": quantity,
-                "unit": unit,
-                "max_delivery_date": max_delivery_date,
-            }
-        ],
-    }
-    request = Request(
-        f"{API_BASE_URL}/api/quote",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+    """Request a quote using backend/schemas.py request fields."""
+    return _request_json(
+        "/api/quote",
         method="POST",
+        payload={
+            "buyer_id": buyer_id,
+            "items": [
+                {
+                    "product_query": product_query,
+                    "quantity": quantity,
+                    "unit": unit,
+                    "max_delivery_date": max_delivery_date,
+                }
+            ],
+        },
     )
-    try:
-        with urlopen(request, timeout=10) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        try:
-            detail = json.loads(exc.read().decode("utf-8")).get("detail", str(exc))
-        except (ValueError, AttributeError):
-            detail = str(exc)
-        raise DataServiceError(f"Quote API returned HTTP {exc.code}: {detail}") from exc
-    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise DataServiceError(
-            f"Could not reach the mock API at {API_BASE_URL}. Start the backend and try again. ({exc})"
-        ) from exc
+
+
+def get_guardrails() -> dict[str, Any]:
+    """Read the current backend purchasing limits."""
+    return _request_json("/api/guardrails")
+
+
+def update_guardrails(config: dict[str, Any]) -> dict[str, Any]:
+    """Save purchasing limits using the backend GuardrailsConfig."""
+    return _request_json("/api/guardrails", method="PUT", payload=config)
+
+
+def create_order(buyer_id: str, signed_quote_token: str) -> dict[str, Any]:
+    """Submit an order request; the backend decides whether approval is needed."""
+    return _request_json(
+        "/api/orders",
+        method="POST",
+        payload={"buyer_id": buyer_id, "signed_quote_token": signed_quote_token},
+    )
 
 
 def get_carbon_footprint(product_id: str) -> float | None:
