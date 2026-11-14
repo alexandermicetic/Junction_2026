@@ -103,7 +103,7 @@ def get_price(product_id: str, quantity: float = 1) -> dict[str, Any]:
     """Return the price record if a price feed is added; never estimate a price."""
     if not PRICE_FILE.is_file():
         return {"productId": product_id, "quantity": quantity, "price": None,
-                "available": False, "source": None,
+                "available": None, "source": None, "sourceStatus": "missing",
                 "message": "Hintatietoa ei ole mukana nykyisessä mock-datassa."}
     raise DataSourceUnavailable(
         f"Hintatiedosto {PRICE_FILE.name} löytyi, mutta sille ei ole skeemaa tai API-määrittelyä."
