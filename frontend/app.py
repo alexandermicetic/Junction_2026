@@ -185,7 +185,7 @@ with search_tab:
 with chat_tab:
     st.subheader("Purchasing assistant")
     st.caption(
-        "An OpenAI language model handles conversation and extracts quote requests. Product matching and "
+        "Claude handles conversation and extracts quote requests. Product matching and "
         "quotes still use the local catalog and synthetic backend; this chat cannot place orders."
     )
     if "chat_messages" not in st.session_state:

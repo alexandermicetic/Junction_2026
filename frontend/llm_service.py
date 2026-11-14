@@ -1,4 +1,4 @@
-"""Small OpenAI Responses API client used by the purchasing chat UI."""
+"""Anthropic Claude Messages API client used by the purchasing chat UI."""
 from __future__ import annotations
 
 import json
@@ -29,8 +29,8 @@ RESPONSE_SCHEMA: dict[str, Any] = {
 
 
 def _get_api_key() -> str:
-    """Read the key from the process environment or the ignored project .env file."""
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    """Read the Anthropic key from the process environment or ignored project .env file."""
+    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
     if api_key:
         return api_key
 
@@ -41,7 +41,7 @@ def _get_api_key() -> str:
         return ""
     for line in lines:
         name, separator, value = line.partition("=")
-        if separator and name.strip() == "OPENAI_API_KEY":
+        if separator and name.strip() == "ANTHROPIC_API_KEY":
             value = value.strip()
             if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
                 value = value[1:-1]
@@ -54,13 +54,14 @@ def get_chat_response(messages: list[dict[str, str]], *, today: str) -> dict[str
     api_key = _get_api_key()
     if not api_key:
         raise LLMServiceError(
-            "Set OPENAI_API_KEY in the app's environment or add it to the project .env file, then restart Streamlit."
+            "Set ANTHROPIC_API_KEY in the app's environment or add it to the project .env file, then restart Streamlit."
         )
 
-    default_base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
-    base_url = os.getenv("OPENAI_BASE_URL", default_base_url).strip().rstrip("/")
+    default_base_url = "https://api.anthropic.com"
+    base_url = os.getenv("ANTHROPIC_BASE_URL", default_base_url).strip().rstrip("/")
     base_url = base_url or default_base_url.rstrip("/")
-    model = os.getenv("OPENAI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+    default_model = "claude-sonnet-4-6"
+    model = os.getenv("ANTHROPIC_MODEL", default_model).strip() or default_model
     safe_messages = [
         {"role": message["role"], "content": message["content"][:2000]}
         for message in messages[-10:]
@@ -79,22 +80,27 @@ def get_chat_response(messages: list[dict[str, str]], *, today: str) -> dict[str
     )
     payload = {
         "model": model,
-        "messages": [{"role": "system", "content": system_message}, *safe_messages],
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "purchasing_chat_intent",
-                "strict": True,
-                "schema": RESPONSE_SCHEMA,
-            },
-        },
-        "max_tokens": 500,
+        "max_tokens": 700,
+        "system": system_message,
+        "messages": safe_messages,
+        "tools": [
+            {
+                "name": "return_purchasing_chat_intent",
+                "description": (
+                    "Classify the conversation and return either a natural-language chat reply or "
+                    "a structured quote request. This tool does not place orders."
+                ),
+                "input_schema": RESPONSE_SCHEMA,
+            }
+        ],
+        "tool_choice": {"type": "tool", "name": "return_purchasing_chat_intent"},
     }
     request = Request(
-        f"{base_url}/chat/completions",
+        f"{base_url}/v1/messages",
         data=json.dumps(payload).encode("utf-8"),
         headers={
-            "Authorization": f"Bearer {api_key}",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
             "Content-Type": "application/json",
             "Accept": "application/json",
         },
@@ -104,25 +110,36 @@ def get_chat_response(messages: list[dict[str, str]], *, today: str) -> dict[str
         with urlopen(request, timeout=30) as response:
             response_data = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace").strip()
         try:
-            error_data = json.loads(exc.read().decode("utf-8"))
-            detail = error_data.get("error", {}).get("message", "Request rejected")
-        except (ValueError, AttributeError):
-            detail = "Request rejected"
-        raise LLMServiceError(f"The language model returned HTTP {exc.code}: {detail}") from exc
+            error_data = json.loads(body)
+            api_error = error_data.get("error") if isinstance(error_data, dict) else None
+            if isinstance(api_error, dict):
+                detail = api_error.get("message") or error_data.get("message") or body
+            elif isinstance(api_error, str):
+                detail = api_error
+            else:
+                detail = error_data.get("message", body) if isinstance(error_data, dict) else body
+        except json.JSONDecodeError:
+            detail = body or "The API returned an empty error response."
+        detail = str(detail)[:500]
+        raise LLMServiceError(f"Claude returned HTTP {exc.code}: {detail}") from exc
     except (URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise LLMServiceError(f"Could not reach the language model: {exc}") from exc
 
-    try:
-        output_text = response_data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise LLMServiceError("The language model returned an unreadable response. Please try again.") from exc
-    if not isinstance(output_text, str):
-        raise LLMServiceError("The language model returned an unreadable response. Please try again.")
-    try:
-        result = json.loads(output_text)
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise LLMServiceError("The language model returned an unreadable response. Please try again.") from exc
+    if not isinstance(response_data, dict):
+        raise LLMServiceError("Claude returned an unreadable response. Please try again.")
+    content = response_data.get("content", [])
+    result = next(
+        (
+            block.get("input")
+            for block in content
+            if isinstance(block, dict)
+            and block.get("type") == "tool_use"
+            and block.get("name") == "return_purchasing_chat_intent"
+        ),
+        None,
+    ) if isinstance(content, list) else None
     if not isinstance(result, dict) or result.get("intent") not in {"chat", "quote"}:
-        raise LLMServiceError("The language model returned an invalid chat response. Please try again.")
+        raise LLMServiceError("Claude returned an invalid chat response. Please try again.")
     return result

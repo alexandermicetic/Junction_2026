@@ -59,20 +59,19 @@ Our design priorities:
 
 ### Enable the purchasing chatbot
 
-The chatbot uses Gemini through its OpenAI-compatible Chat Completions API. Set `OPENAI_API_KEY` to your
-Gemini API key in the environment where Streamlit runs. The default `OPENAI_BASE_URL` is
-`https://generativelanguage.googleapis.com/v1beta/openai/`, and the default `OPENAI_MODEL` is
-`gemini-2.5-flash`; set either variable to override it.
+The chatbot uses Anthropic's native Claude Messages API. Set `ANTHROPIC_API_KEY` to your Anthropic API key
+in the environment where Streamlit runs. The default `ANTHROPIC_BASE_URL` is `https://api.anthropic.com`,
+and the default `ANTHROPIC_MODEL` is `claude-sonnet-4-6`; set either variable to override it. You can also
+put `ANTHROPIC_API_KEY=your-anthropic-api-key` in the root `.env` file, which is ignored by Git.
 
-You can add `OPENAI_API_KEY=your-api-key` to the root `.env` file, which is ignored by Git, or set it
-in PowerShell for the current terminal before starting the frontend:
+On PowerShell, set the key for the current terminal before starting the frontend:
 
 ```powershell
-$env:OPENAI_API_KEY = "your-gemini-api-key"
+$env:ANTHROPIC_API_KEY = "your-anthropic-api-key"
 streamlit run frontend/app.py
 ```
 
-The chatbot sends recent conversation messages to Gemini to answer questions and extract quote requests.
+The chatbot sends recent conversation messages to Claude to answer questions and extract quote requests.
 Product searches use the local synthetic catalog, and quote details come from the mock backend. The chatbot
 does not submit orders. Keep API keys in environment variables and never commit them.
 
