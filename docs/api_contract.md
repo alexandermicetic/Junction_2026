@@ -52,4 +52,14 @@ Updates the guardrails with the following JSON body:
 {"max_autonomous_spend_eur":750.0,"forbidden_allergens":["lactose","peanut"],"allow_substitutions":false}
 ```
 
+## POST `/api/claude/purchase`
+
+Asks Claude to interpret one product request, compare live quoted options, select one SKU, and submit only that selected product through the signed quote and existing order guardrails. Requests for multiple products or missing/ambiguous quantities return `needs_clarification` without creating an order. A guardrail-blocked order is returned as `PENDING_APPROVAL` for the normal human decision endpoint.
+
+```json
+{"buyer_id":"BUYER-TEST-001","request_text":"Order 12 cases of lactose-free milk","max_delivery_date":"2026-11-17"}
+```
+
+Configure `ANTHROPIC_API_KEY` in the ignored `backend/.env` file. `ANTHROPIC_MODEL` defaults to `claude-sonnet-5`; use `ANTHROPIC_WORKSPACE_ID` when the key is not scoped to a single workspace. Claude's short product selection summary is recorded in the order audit trail as `claude_purchase_agent`; the signed quote and guardrail evaluation remain server-side.
+
 All responses use JSON. An invalid request returns a FastAPI validation error (HTTP 422), an unknown order returns HTTP 404, and an order that has already been decided returns HTTP 409.

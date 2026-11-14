@@ -103,3 +103,16 @@ class InventoryConsumeResponse(BaseModel):
 
 class InventoryReorderCheckResponse(BaseModel):
     results: list[InventoryReorderResult]
+
+
+class ClaudePurchaseRequest(BaseModel):
+    buyer_id: str = Field(min_length=1)
+    request_text: str = Field(min_length=3, max_length=2000)
+    max_delivery_date: str | None = None
+
+
+class ClaudePurchaseResponse(BaseModel):
+    status: Literal["needs_clarification", "no_available_product", "duplicate_skipped", "already_processing", "CONFIRMED", "PENDING_APPROVAL"]
+    message: str
+    selected_product: QuotedProduct | None = None
+    order: OrderResponse | None = None

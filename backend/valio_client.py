@@ -45,6 +45,20 @@ QUERY_SYNONYMS = {
     "laktoositon": {"laktoositon", "lactose-free", "lactose free"},
     "lactose-free": {"laktoositon", "lactose-free", "lactose free"},
 }
+DERIVATIVE_MODIFIERS = frozenset({
+    "coconut", "kookos", "oat", "kaura", "soy", "soija", "almond", "manteli",
+    "rice", "riisi", "chocolate", "suklaa", "powder", "jauhe", "condensed",
+    "tiiviste", "sauce", "kastike", "ice cream", "jäätelö", "liqueur", "likööri",
+})
+CORE_DAIRY_PATTERN = re.compile(
+    r"(?<![\w])(?:milk|maito|kevytmaito|rasvaton\s+maito|rasvatonmaito|täysmaito|luomumaito|maitojuoma)(?![\w])",
+    re.IGNORECASE,
+)
+CORE_DAIRY_CATEGORY_PATTERN = re.compile(
+    r"(?<![\w])(?:dairy|milk|milk products|maito|meijeri|meijerituotteet)(?![\w])",
+    re.IGNORECASE,
+)
+FINNISH_MAITO_COMPOUND_PATTERN = re.compile(r"(?<![\w])maito[a-zäöå-]+(?![\w])", re.IGNORECASE)
 
 
 def _base_quantity(value: float, unit: str, dimension: str) -> float:
@@ -82,7 +96,7 @@ def _product_measurement(product: dict[str, Any], names: list[dict[str, Any]]) -
             value = conversion.get(field, {}).get("value")
             if value:
                 source_unit = str(conversion[field].get("unit", unit)).lower()
-                if field == "volume":
+                if field == "volume" and source_unit not in {"kg", "kgm", "g", "grm"}:
                     numeric = float(value)
                     display_unit = "L" if source_unit in {"ltr", "l"} else CANONICAL_UNITS.get(source_unit, source_unit)
                     dimension = "volume"
@@ -102,17 +116,21 @@ def _catalog_product(product: dict[str, Any]) -> dict[str, Any]:
     allergens = _text_values(classifications.get("allergen", []))
     measurement = _product_measurement(product, names)
     package_sizes = ([{"unit": measurement[1], "size": measurement[0], "base_size": _base_quantity(measurement[0], measurement[1], measurement[2]), "dimension": measurement[2]}] if measurement else [])
+    names_text = " ".join(str(item.get("value", "")) for item in names)
     search_text = " ".join([
         str(item.get("value", "")) for item in names
     ] + [str(product.get("category", "")), str(product.get("id", "")), *allergens, *labels])
     return {
         "sku": str(product.get("id", "")),
         "name": _english_name(product),
+        "name_variants": names_text,
         "category": str(product.get("category", "")),
+        "brand": str(synkka.get("brand") or ""),
+        "manufacturer": str(product.get("vendorName") or ""),
         "package_sizes": package_sizes or [{"unit": product.get("baseUnit", "unit"), "size": 1.0}],
         "allergens": allergens,
         "sustainability_labels": labels,
-        "search_text": search_text + " " + str(synkka.get("brand", "")),
+        "search_text": search_text + " " + str(synkka.get("brand", "")) + " " + str(product.get("vendorName", "")),
     }
 
 
@@ -134,8 +152,9 @@ def _search_catalog(query: str, quantity: float | None = None, requested_unit: s
     normalized_unit = str(requested_unit or next((token for token in tokens if token in UNIT_ALIASES), "")).lower()
     requested_dimension = UNIT_ALIASES.get(normalized_unit)
     requested_volume = requested_dimension == "volume"
-    explicitly_requests_powder = any(term in query_lower for term in ("powder", "jauhe"))
-    generic_milk = bool(re.fullmatch(r"(?:milk|maito)", query_lower.strip()))
+    generic_dairy_query = bool(CORE_DAIRY_PATTERN.search(query_lower)) and not any(
+        modifier in query_lower for modifier in DERIVATIVE_MODIFIERS
+    )
 
     def expanded_tokens(token: str) -> set[str]:
         return QUERY_SYNONYMS.get(token, {token})
@@ -147,7 +166,11 @@ def _search_catalog(query: str, quantity: float | None = None, requested_unit: s
         return bool(re.search(r"\b(powder|jauhe)\b", product["search_text"].lower()))
 
     def liquid_match(product: dict[str, Any]) -> bool:
-        return compatible(product) and any(item.get("dimension") == "volume" for item in product["package_sizes"]) and (explicitly_requests_powder or not is_powder(product))
+        return any(item.get("dimension") == "volume" for item in product["package_sizes"]) and not is_powder(product)
+
+    def eligible(product: dict[str, Any]) -> bool:
+        # Apply the requested dimension (and liquid-only rule for volume) before scoring.
+        return compatible(product) and (not requested_volume or liquid_match(product))
 
     def relevant_name(product: dict[str, Any]) -> bool:
         name = product["search_text"].lower()
@@ -155,12 +178,19 @@ def _search_catalog(query: str, quantity: float | None = None, requested_unit: s
             if token in UNIT_ALIASES:
                 continue
             variants = expanded_tokens(token)
-            if not any(re.search(rf"(?<![a-zäöå]){re.escape(variant)}(?![a-zäöå])", name) or re.search(rf"(?<![a-zäöå])(?:[a-zäöå-]+)?{re.escape(variant)}(?:juoma|drink|free)?(?![a-zäöå])", name) for variant in variants):
+            if not any(
+                re.search(rf"(?<!\w){re.escape(variant)}(?!\w)", name)
+                or re.search(rf"(?<!\w){re.escape(variant)}[\w-]+(?!\w)", name)
+                or re.search(rf"(?<!\w)(?:[\w-]+)?{re.escape(variant)}(?:juoma|drink|free)?(?!\w)", name)
+                for variant in variants
+            ):
                 return False
         return True
 
     def score(product: dict[str, Any]) -> int:
         name = product["name"].lower()
+        product_name = f"{product['name']} {product.get('name_variants', '')}".casefold()
+        product_text = f"{product_name} {product['search_text']}".casefold()
         score_value = 0
         for token in tokens:
             if token in UNIT_ALIASES:
@@ -168,26 +198,31 @@ def _search_catalog(query: str, quantity: float | None = None, requested_unit: s
             variants = expanded_tokens(token)
             if any(re.search(rf"\b{re.escape(variant)}\b", name) for variant in variants):
                 score_value += 100
-            elif any(re.search(rf"\b[a-zäöå-]*{re.escape(variant)}[a-zäöå-]*\b", name) for variant in variants):
+            elif any(re.search(rf"\b[\w-]*{re.escape(variant)}[\w-]*\b", name) for variant in variants):
                 score_value += 60
             elif any(variant in product["search_text"].lower() for variant in variants):
                 score_value += 10
-        if generic_milk:
-            product_text = f"{product['name']} {product['search_text']}".lower()
-            dairy_terms = ("valio", "maito", "kevytmaito", "rasvaton maito", "täysmaito", "luomumaito", "eila")
-            plant_terms = ("coconut", "kookos", "oat", "kaura", "soy", "soija", "almond", "manteli")
-            if any(term in product_text for term in dairy_terms):
-                score_value += 1000
-            if any(term in product_text for term in plant_terms):
-                score_value -= 500
+        for modifier in DERIVATIVE_MODIFIERS:
+            if modifier in product_name and modifier not in query_lower:
+                score_value -= 120
+        if re.search(r"(?<![\w])maito(?![\w])", query_lower) and any(
+            compound.casefold() != "maitojuoma"
+            for compound in FINNISH_MAITO_COMPOUND_PATTERN.findall(product_text)
+        ):
+            score_value -= 100
+        if generic_dairy_query:
+            if CORE_DAIRY_PATTERN.search(product_text):
+                score_value += 60
+            identity = f"{product.get('brand', '')} {product.get('manufacturer', '')}"
+            if (
+                re.search(r"(?<![\w])valio(?![\w])", identity, re.IGNORECASE)
+                or CORE_DAIRY_CATEGORY_PATTERN.search(product["category"])
+            ):
+                score_value += 35
         return score_value
 
-    # Keep all dimension matches available for the explicit fallback decision below.
-    matches = [product for product in CATALOG if (requested_volume or compatible(product)) and relevant_name(product) and score(product) > 0]
-    if requested_volume:
-        liquid_matches = [product for product in matches if liquid_match(product)]
-        # A different unit is considered only when the catalog has no liquid match at all.
-        matches = liquid_matches or [product for product in matches if not is_powder(product) or explicitly_requests_powder]
+    # Apply requested dimensions before scoring so incompatible products never compete.
+    matches = [product for product in CATALOG if eligible(product) and relevant_name(product) and score(product) > 0]
     ranked = sorted(matches, key=score, reverse=True)
     results = ranked[:limit]
     if quantity is not None:
