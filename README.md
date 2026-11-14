@@ -62,7 +62,8 @@ Our design priorities:
 The chatbot uses the OpenAI Responses API. Set `OPENAI_API_KEY` in the environment where Streamlit runs.
 Optionally set `OPENAI_MODEL` to choose another model; the default is `gpt-4.1-mini`.
 
-On PowerShell, set the key for the current terminal before starting the frontend:
+You can add `OPENAI_API_KEY=your-api-key` to the root `.env` file, which is ignored by Git, or set it
+in PowerShell for the current terminal before starting the frontend:
 
 ```powershell
 $env:OPENAI_API_KEY = "your-api-key"

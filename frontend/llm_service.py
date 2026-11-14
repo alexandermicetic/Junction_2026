@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -27,12 +28,33 @@ RESPONSE_SCHEMA: dict[str, Any] = {
 }
 
 
+def _get_api_key() -> str:
+    """Read the key from the process environment or the ignored project .env file."""
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if api_key:
+        return api_key
+
+    env_file = Path(__file__).resolve().parents[1] / ".env"
+    try:
+        lines = env_file.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        name, separator, value = line.partition("=")
+        if separator and name.strip() == "OPENAI_API_KEY":
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                value = value[1:-1]
+            return value.strip()
+    return ""
+
+
 def get_chat_response(messages: list[dict[str, str]], *, today: str) -> dict[str, Any]:
     """Interpret recent chat context and return validated-shape chat/quote intent."""
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    api_key = _get_api_key()
     if not api_key:
         raise LLMServiceError(
-            "The chatbot needs an OPENAI_API_KEY environment variable. Configure it and restart the app."
+            "Set OPENAI_API_KEY in the app's environment or add it to the project .env file, then restart Streamlit."
         )
 
     model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
