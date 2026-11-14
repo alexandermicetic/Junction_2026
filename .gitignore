@@ -37,3 +37,8 @@ Thumbs.db
 backend/data/product_data_readable.json
 
 backend/data/product_data_readable.json
+
+.venv/
+__pycache__/
+.env
+*.db
