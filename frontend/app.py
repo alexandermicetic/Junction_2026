@@ -333,7 +333,8 @@ with reorder_tab:
     st.subheader("Automatic reorder rules")
     st.caption(
         "The backend has no inventory feed or background scheduler yet. This frontend-only prototype "
-        "lets you configure a rule and simulate a stock update; it cannot monitor stock while the app is closed."
+        "lets you configure a rule and simulate a stock update; it cannot monitor stock while the app is closed. "
+        "The quote endpoint also returns fixed demo milk lines for every product request."
     )
     try:
         guardrails = get_guardrails()
