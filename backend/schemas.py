@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 class QuoteItemRequest(BaseModel):
     product_query: str
+    product_id: str | None = None
     quantity: float = Field(gt=0)
     unit: str
     max_delivery_date: str

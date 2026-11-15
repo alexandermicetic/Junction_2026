@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from statistics import median
 
 import streamlit as st
+import plotly.express as px
 
 from data_service import (
     DataServiceError,
@@ -15,7 +17,7 @@ from data_service import (
     get_products,
     update_guardrails,
 )
-from llm_service import LLMServiceError, get_chat_response
+from llm_service import LLMServiceError, get_chat_response, select_catalog_product
 
 st.set_page_config(page_title="Valio Aimo | Purchasing", page_icon="🥛", layout="wide")
 st.markdown(
@@ -41,6 +43,33 @@ def quote_summary(quote: dict) -> str:
     total = quote.get("total_eur")
     total_text = f"€{total:,.2f}" if total is not None else "no total returned"
     return f"Quote {quote.get('quote_id', '')}: {names}. Total: {total_text}."
+
+
+def quote_delivery_summary(
+    quote: dict, selection: dict, selected_product: dict, requested_quantity: int, requested_unit: str
+) -> str:
+    """Explain the actual quoted pack count and its total measurable contents."""
+    packs = sum(int(item.get("quantity", 0)) for item in quote.get("items", []))
+    unit = str(selection.get("pack_unit", requested_unit))
+    pack_size = float(selection.get("pack_size_kg") if unit == "kg" else selection.get("total_pack_size", 1))
+    delivered = packs * pack_size
+    sales_unit = str(selection.get("orderable_unit") or selected_product.get("salesUnit", "")).strip().casefold()
+    pack_word = "case" if sales_unit in {"cs", "case", "cases"} else "package"
+    if packs != 1:
+        pack_word += "s"
+    dimension = "mass" if unit == "kg" else "volume" if unit == "l" else "count"
+    request_scale = {
+        "kg": ("mass", 1.0), "kgm": ("mass", 1.0), "g": ("mass", 0.001), "grm": ("mass", 0.001),
+        "gram": ("mass", 0.001), "grams": ("mass", 0.001),
+        "l": ("volume", 1.0), "ltr": ("volume", 1.0), "liter": ("volume", 1.0), "liters": ("volume", 1.0),
+        "litre": ("volume", 1.0), "litres": ("volume", 1.0), "dl": ("volume", 0.1),
+        "cl": ("volume", 0.01), "ml": ("volume", 0.001), "mlt": ("volume", 0.001),
+    }.get(requested_unit.casefold(), ("count", 1.0))
+    if request_scale[0] == dimension:
+        requested_base = requested_quantity * request_scale[1]
+        status = "to cover" if delivered >= requested_base else "currently quoted against"
+        return f"{packs} {pack_word} = {delivered:g} {unit} {status} your {requested_quantity:g} {requested_unit} request."
+    return f"{packs} {pack_word} quoted for your requested {requested_quantity:g} {requested_unit}."
 
 
 st.markdown('<p class="eyebrow">Valio Aimo · Junction 2026</p>', unsafe_allow_html=True)
@@ -135,6 +164,7 @@ with search_tab:
                     quantity=quantity,
                     unit=unit,
                     max_delivery_date=due_date.isoformat(),
+                    product_id=str(selected["id"]),
                 )
                 st.session_state["catalog_quote"] = quote
                 st.session_state["catalog_quote_request_key"] = request_key
@@ -148,10 +178,6 @@ with search_tab:
             else None
         )
         if quote:
-            st.warning(
-                "The current backend returns fixed demo milk items regardless of the requested product. "
-                "Review the returned names before relying on this quote."
-            )
             quote_cols = st.columns(3)
             quote_cols[0].metric("Quote total", f'€{quote["total_eur"]:,.2f}')
             quote_cols[1].metric(
@@ -183,7 +209,7 @@ with search_tab:
 with chat_tab:
     st.subheader("Purchasing assistant")
     st.caption(
-        "An OpenAI language model handles conversation and extracts quote requests. Product matching and "
+        "Claude handles conversation and extracts quote requests. Product matching and "
         "quotes still use the local catalog and synthetic backend; this chat cannot place orders."
     )
     if "chat_messages" not in st.session_state:
@@ -232,7 +258,7 @@ with chat_tab:
                             reply = "Please provide a delivery date that is today or later."
                         else:
                             try:
-                                matches = get_products(product_query, limit=5)
+                                matches = get_products(product_query, limit=12, requested_unit=unit, quantity=quantity)
                             except (OSError, ValueError) as exc:
                                 matches = []
                                 reply = f"I could not search the product catalog: {exc}"
@@ -247,28 +273,48 @@ with chat_tab:
                                     )
                             else:
                                 try:
-                                    quote = create_quote(
-                                        buyer_id="restaurant-001",
+                                    selection = select_catalog_product(
                                         product_query=product_query,
                                         quantity=quantity,
                                         unit=unit,
-                                        max_delivery_date=due_date.isoformat(),
+                                        candidates=matches,
                                     )
-                                    st.session_state["chat_quote"] = quote
-                                    st.session_state["chat_quote_context"] = {
-                                        "query": product_query,
-                                        "quantity": quantity,
-                                        "unit": unit,
-                                        "date": due_date.isoformat(),
-                                        "matches": [item["displayName"] for item in matches],
-                                    }
-                                    reply = (
-                                        f'I found {len(matches)} catalog match(es), including '
-                                        f'"{matches[0]["displayName"]}". {quote_summary(quote)} '
-                                        "The quote endpoint currently returns fixed demo milk items, so check that they match your request."
+                                    selected_id = selection["product_id"]
+                                    selected_product = next(
+                                        (product for product in matches if str(product.get("id")) == selected_id),
+                                        None,
                                     )
+                                    if selected_id == "__none__" or selected_product is None:
+                                        reply = (
+                                            f'I found catalog records related to "{product_query}", but none '
+                                            "could be confirmed as the requested product and unit. Please refine the product name."
+                                        )
+                                    else:
+                                        quote = create_quote(
+                                            buyer_id="restaurant-001",
+                                            product_query=selected_product["displayName"],
+                                            quantity=quantity,
+                                            unit=unit,
+                                            max_delivery_date=due_date.isoformat(),
+                                            product_id=selected_id,
+                                        )
+                                        st.session_state["chat_quote"] = quote
+                                        st.session_state["chat_quote_context"] = {
+                                            "query": product_query,
+                                            "quantity": quantity,
+                                            "unit": unit,
+                                            "date": due_date.isoformat(),
+                                            "selected_product": selected_product["displayName"],
+                                        }
+                                        reply = (
+                                            f'Claude matched "{selected_product["displayName"]}" to your request. '
+                                            f'{quote_summary(quote)} '
+                                            f'{quote_delivery_summary(quote, selection, selected_product, quantity, unit)}'
+                                        )
                                 except DataServiceError as exc:
                                     reply = f"I could not retrieve a quote: {exc}"
+                                except LLMServiceError as exc:
+                                    reply = str(exc)
             except LLMServiceError as exc:
                 reply = str(exc)
 
@@ -304,7 +350,7 @@ with reorder_tab:
     st.caption(
         "The backend has no inventory feed or background scheduler yet. This frontend-only prototype "
         "lets you configure a rule and simulate a stock update; it cannot monitor stock while the app is closed. "
-        "The quote endpoint also returns fixed demo milk lines for every product request."
+        "The quote endpoint uses the selected local catalog product ID."
     )
     try:
         guardrails = get_guardrails()
@@ -473,39 +519,193 @@ with reorder_tab:
         st.info("The backend did not return purchasing limits.")
 
 with compare_tab:
-    st.subheader("Carbon footprint and delivery reliability")
+    st.subheader("Product sustainability")
     st.caption(
-        "This chart joins the two repository CSV files by product ID. Carbon footprint is kg CO₂-equivalent per kg; "
-        "delivery reliability is shown as a percentage."
+        "Compare product carbon footprints with delivery reliability to spot options that balance lower impact "
+        "and dependable supply. Lower CO₂e and higher delivery reliability are preferable."
     )
+
     comparison = get_comparison_data()
     if comparison:
-        left, right = st.columns([1.2, 1])
-        with left:
-            st.markdown("#### Product comparison")
-            st.scatter_chart(
-                comparison,
+        carbon_values = [
+            row["carbonKgCo2EqPerKg"]
+            for row in comparison
+            if row["carbonKgCo2EqPerKg"] is not None
+        ]
+        reliability_values = [
+            row["deliveryReliability"]
+            for row in comparison
+            if row["deliveryReliability"] is not None
+        ]
+        carbon_midpoint = median(carbon_values) if carbon_values else None
+        reliability_midpoint = median(reliability_values) if reliability_values else None
+
+        classified_rows = []
+        for row in comparison:
+            carbon = row["carbonKgCo2EqPerKg"]
+            reliability = row["deliveryReliability"]
+            if carbon is None or reliability is None:
+                performance_class = "Insufficient data"
+            else:
+                lower_footprint = carbon_midpoint is not None and carbon <= carbon_midpoint
+                higher_reliability = reliability_midpoint is not None and reliability >= reliability_midpoint
+                if lower_footprint and higher_reliability:
+                    performance_class = "Optimal"
+                elif lower_footprint or higher_reliability:
+                    performance_class = "Balanced"
+                else:
+                    performance_class = "Needs improvement"
+            classified_rows.append(
+                {
+                    **row,
+                    "performanceClass": performance_class,
+                    "deliveryReliabilityPct": reliability * 100 if reliability is not None else None,
+                }
+            )
+
+        include_missing_carbon = bool(
+            st.session_state.get("sustainability_include_missing_carbon", False)
+        )
+        product_search = str(st.session_state.get("sustainability_search", "")).strip().casefold()
+
+        visible_rows = [
+            row
+            for row in classified_rows
+            if (include_missing_carbon or row["carbonKgCo2EqPerKg"] is not None)
+            and (
+                not product_search
+                or product_search in str(row["productName"]).casefold()
+                or product_search in str(row["productId"]).casefold()
+            )
+        ]
+        visible_carbon = [
+            row["carbonKgCo2EqPerKg"]
+            for row in visible_rows
+            if row["carbonKgCo2EqPerKg"] is not None
+        ]
+        visible_reliability = [
+            row["deliveryReliability"]
+            for row in visible_rows
+            if row["deliveryReliability"] is not None
+        ]
+        optimal_count = sum(row["performanceClass"] == "Optimal" for row in visible_rows)
+
+        kpis = st.columns(4)
+        kpis[0].metric("Products", f"{len(visible_rows):,}")
+        kpis[1].metric(
+            "Average CO₂e",
+            f"{sum(visible_carbon) / len(visible_carbon):.2f} kg CO₂e/kg"
+            if visible_carbon
+            else "—",
+        )
+        kpis[2].metric(
+            "Average delivery reliability",
+            f"{sum(visible_reliability) / len(visible_reliability):.1%}" if visible_reliability else "—",
+        )
+        kpis[3].metric(
+            "Optimal products",
+            f"{optimal_count:,}",
+            help=(
+                "Products with CO₂e at or below the full-dataset median and delivery reliability "
+                "at or above its median."
+            ),
+        )
+        st.caption(
+            "KPIs and the table follow the active filters. Classes use full-dataset medians: Optimal meets both "
+            "benchmarks, Balanced meets one, and Needs improvement meets neither."
+        )
+
+        filter_cols = st.columns([1, 1.8])
+        filter_cols[0].checkbox(
+            "Include products without CO₂e data",
+            key="sustainability_include_missing_carbon",
+        )
+        filter_cols[1].text_input(
+            "Search products", placeholder="Product name or ID", key="sustainability_search"
+        )
+
+        chart_rows = [
+            row for row in visible_rows
+            if row["carbonKgCo2EqPerKg"] is not None and row["deliveryReliability"] is not None
+        ]
+        if chart_rows:
+            chart = px.scatter(
+                chart_rows,
                 x="carbonKgCo2EqPerKg",
-                y="deliveryReliability",
-                x_label="Carbon footprint (kg CO₂-eq / kg)",
-                y_label="Delivery reliability (0–1)",
-                alt="Carbon footprint versus delivery reliability for products with both measurements.",
+                y="deliveryReliabilityPct",
+                color="performanceClass",
+                color_discrete_map={
+                    "Optimal": "#10B981",
+                    "Balanced": "#3B82F6",
+                    "Needs improvement": "#F97316",
+                },
+                hover_name="productName",
+                hover_data={
+                    "productId": True,
+                    "carbonKgCo2EqPerKg": ":.2f",
+                    "deliveryReliabilityPct": ":.1f",
+                    "performanceClass": True,
+                },
+                labels={
+                    "carbonKgCo2EqPerKg": "Carbon footprint (kg CO₂e / kg)",
+                    "deliveryReliabilityPct": "Delivery reliability (%)",
+                    "performanceClass": "Performance class",
+                    "productId": "Product ID",
+                },
             )
-            st.caption("Lower carbon footprint and higher delivery reliability are preferable.")
-        with right:
-            st.markdown("#### Product indicators")
-            st.dataframe(
-                [
-                    {
-                        "Product": row["productName"],
-                        "Product ID": row["productId"],
-                        "kg CO₂-eq / kg": row["carbonKgCo2EqPerKg"],
-                        "Delivery reliability": f'{row["deliveryReliability"]:.1%}',
-                    }
-                    for row in comparison
-                ],
-                hide_index=True,
-                use_container_width=True,
+            chart.update_traces(
+                marker={"size": 11, "opacity": 0.85, "line": {"width": 1, "color": "white"}}
             )
+            chart.update_xaxes(showgrid=True, gridcolor="rgba(148, 163, 184, 0.18)", zeroline=False)
+            chart.update_yaxes(
+                range=[0, 100],
+                tick0=0,
+                dtick=20,
+                ticksuffix="%",
+                showgrid=True,
+                gridcolor="rgba(148, 163, 184, 0.18)",
+                zeroline=False,
+            )
+            chart.update_layout(
+                height=460,
+                plot_bgcolor="rgba(0, 0, 0, 0)",
+                paper_bgcolor="rgba(0, 0, 0, 0)",
+                margin={"l": 16, "r": 16, "t": 24, "b": 12},
+                legend_title_text="Performance class",
+            )
+            st.plotly_chart(chart, use_container_width=True, config={"displayModeBar": False})
+        elif visible_rows:
+            st.info("No visible products have both a CO₂e value and delivery reliability for the chart.")
+        else:
+            st.info("No products match these filters.")
+
+        st.markdown("#### Product indicators")
+        indicator_rows = [
+            {
+                "Product": row["productName"],
+                "Performance class": row["performanceClass"],
+                "kg CO₂-eq / kg": row["carbonKgCo2EqPerKg"],
+                "Delivery reliability": (
+                    row["deliveryReliabilityPct"] if row["deliveryReliabilityPct"] is not None else None
+                ),
+            }
+            for row in visible_rows
+        ]
+        st.dataframe(
+            indicator_rows,
+            column_order=["Product", "Performance class", "kg CO₂-eq / kg", "Delivery reliability"],
+            column_config={
+                "Product": st.column_config.TextColumn("Product", width="large"),
+                "Performance class": st.column_config.TextColumn("Class", width="medium"),
+                "kg CO₂-eq / kg": st.column_config.NumberColumn(
+                    "kg CO₂e / kg", format="%.2f", width="small"
+                ),
+                "Delivery reliability": st.column_config.ProgressColumn(
+                    "Delivery reliability", min_value=0, max_value=100, format="%.0f%%", width="medium"
+                ),
+            },
+            hide_index=True,
+            use_container_width=True,
+        )
     else:
-        st.warning("The carbon footprint and delivery reliability datasets have no product IDs in common.")
+        st.warning("No product records are available for the sustainability comparison.")

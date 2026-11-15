@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -98,25 +99,80 @@ def _product_name(product: dict[str, Any]) -> str:
     )
 
 
-def get_products(query: str = "", limit: int = 100) -> list[dict[str, Any]]:
-    """Search local product records by name, brand, supplier, or product code."""
-    needle = query.strip().casefold()
-    results: list[dict[str, Any]] = []
+def _unit_dimension(unit: str) -> str | None:
+    normalized = unit.casefold().strip()
+    if normalized in {"l", "liter", "litre", "litres", "liters", "dl", "cl", "ml", "mlt", "ltr"}:
+        return "volume"
+    if normalized in {"kg", "kgm", "kilo", "kilogram", "g", "grm", "gram", "grams"}:
+        return "weight"
+    if normalized in {"pcs", "pc", "piece", "pieces", "unit", "units", "kpl"}:
+        return "count"
+    return None
+
+
+def _product_search_text(product: dict[str, Any]) -> tuple[str, str]:
+    synkka = product.get("synkkaData") or {}
+    names = [str(item.get("value", "")) for item in synkka.get("names", []) if item.get("value")]
+    primary_name = _product_name(product)
+    identity = " ".join([str(product.get("id", "")), str(product.get("vendorName", "")), str(synkka.get("brand", "")), str(product.get("category", "")), *names]).casefold()
+    return primary_name, identity
+
+
+def _catalog_score(product: dict[str, Any], query: str, requested_unit: str | None, quantity: float | None) -> int | None:
+    name, searchable = _product_search_text(product)
+    tokens = [token for token in query.casefold().replace("-", " ").split() if token]
+    if not tokens:
+        return 0
+    # Requiring every meaningful query term prevents broad substring hits such as
+    # "milk" matching "milk chocolate" when the product is a derivative.
+    searchable_words = set(searchable.replace("-", " ").replace("/", " ").split())
+    if any(token not in searchable_words and token not in searchable for token in tokens):
+        return None
+    score = sum(100 if token in name.casefold().split() else 35 for token in tokens)
+    if query.casefold() in name.casefold():
+        score += 100
+    modifiers = {"chocolate", "suklaa", "powder", "jauhe", "coconut", "kookos", "oat", "kaura", "soy", "soija", "almond", "manteli", "rice", "riisi"}
+    extras = modifiers.intersection(searchable_words).difference(tokens)
+    score -= 120 * len(extras)
+
+    wanted = _unit_dimension(requested_unit or "")
+    if wanted:
+        synkka = product.get("synkkaData") or {}
+        unit_text = " ".join([
+            str(product.get("baseUnit", "")), str(product.get("salesUnit", "")),
+            json.dumps(synkka.get("unitConversions", []), ensure_ascii=False),
+            " ".join(str(item.get("value", "")) for item in synkka.get("names", [])),
+        ]).casefold()
+        has_volume = any(mark in unit_text for mark in ("litre", "liter", " l ", "ml", "cl", "dl", "ltr"))
+        has_weight = any(mark in unit_text for mark in ("kg", "kilogram", "gram", " grm", " g "))
+        has_count = any(mark in unit_text for mark in ("pcs", "piece", "unit", "kpl"))
+        compatible = {"volume": has_volume, "weight": has_weight, "count": has_count}.get(wanted, False)
+        score += 250 if compatible else -250
+    if wanted == "weight" and quantity is not None and quantity >= 20:
+        measurements = " ".join(str(item.get("value", "")) for item in (product.get("synkkaData") or {}).get("names", []))
+        multi = re.search(r"(?<![\w.])(\d+)\s*[xX×]\s*(?:[eE]\s*)?(\d+(?:[.,]\d+)?)\s*(kgm|kg|g|grm|grams?)\b", measurements, re.IGNORECASE)
+        single = multi or re.search(r"(?<![\w.])(?:[eE]\s*)?(\d+(?:[.,]\d+)?)\s*(kgm|kg|g|grm|grams?)\b", measurements, re.IGNORECASE)
+        if single:
+            multiplier = int(multi.group(1)) if multi else 1
+            amount = float((multi.group(2) if multi else single.group(1)).replace(",", "."))
+            package_unit = multi.group(3) if multi else single.group(2)
+            package_kg = amount * multiplier * (0.001 if package_unit.casefold() in {"g", "grm", "gram", "grams"} else 1)
+            if 2 <= package_kg <= 10:
+                score += 240 if multi else 320
+            elif package_kg < 2:
+                score -= 80
+    return score
+
+
+def get_products(query: str = "", limit: int = 100, requested_unit: str | None = None, quantity: float | None = None) -> list[dict[str, Any]]:
+    """Search local records and rank lexical and unit-compatible matches first."""
+    results: list[tuple[int, dict[str, Any]]] = []
     for product in _products():
-        searchable = " ".join(
-            [
-                str(product.get("id", "")),
-                str(product.get("vendorName", "")),
-                str((product.get("synkkaData") or {}).get("brand", "")),
-                _product_name(product),
-            ]
-        ).casefold()
-        if needle and needle not in searchable:
-            continue
-        results.append({**product, "displayName": _product_name(product)})
-        if len(results) >= max(1, limit):
-            break
-    return results
+        score = _catalog_score(product, query, requested_unit, quantity)
+        if score is not None:
+            results.append((score, {**product, "displayName": _product_name(product)}))
+    results.sort(key=lambda item: item[0], reverse=True)
+    return [product for _, product in results[:max(1, limit)]]
 
 
 def create_quote(
@@ -125,6 +181,7 @@ def create_quote(
     quantity: float,
     unit: str,
     max_delivery_date: str,
+    product_id: str | None = None,
 ) -> dict[str, Any]:
     """Request a quote using backend/schemas.py request fields."""
     return _request_json(
@@ -135,6 +192,7 @@ def create_quote(
             "items": [
                 {
                     "product_query": product_query,
+                    "product_id": product_id,
                     "quantity": quantity,
                     "unit": unit,
                     "max_delivery_date": max_delivery_date,
@@ -174,7 +232,7 @@ def get_delivery_reliability(product_id: str) -> float | None:
 
 
 def get_comparison_data() -> list[dict[str, Any]]:
-    """Join carbon footprint and delivery reliability records by productId."""
+    """Join carbon and delivery records without dropping products with missing metrics."""
     carbon = _carbon_by_product()
     reliability = _reliability_by_product()
     product_names = {str(p.get("id")): _product_name(p) for p in _products()}
@@ -182,11 +240,10 @@ def get_comparison_data() -> list[dict[str, Any]]:
         {
             "productId": product_id,
             "productName": product_names.get(product_id, product_id),
-            "carbonKgCo2EqPerKg": footprint,
-            "deliveryReliability": reliability[product_id],
+            "carbonKgCo2EqPerKg": carbon.get(product_id),
+            "deliveryReliability": reliability.get(product_id),
         }
-        for product_id, footprint in carbon.items()
-        if product_id in reliability
+        for product_id in sorted(set(carbon) | set(reliability))
     ]
 
 
