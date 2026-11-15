@@ -45,6 +45,33 @@ def quote_summary(quote: dict) -> str:
     return f"Quote {quote.get('quote_id', '')}: {names}. Total: {total_text}."
 
 
+def quote_delivery_summary(
+    quote: dict, selection: dict, selected_product: dict, requested_quantity: int, requested_unit: str
+) -> str:
+    """Explain the actual quoted pack count and its total measurable contents."""
+    packs = sum(int(item.get("quantity", 0)) for item in quote.get("items", []))
+    pack_size = float(selection.get("total_pack_size", 1))
+    unit = str(selection.get("pack_unit", requested_unit))
+    delivered = packs * pack_size
+    sales_unit = str(selected_product.get("salesUnit", "")).strip().casefold()
+    pack_word = "case" if sales_unit in {"cs", "case", "cases"} else "package"
+    if packs != 1:
+        pack_word += "s"
+    dimension = "mass" if unit == "kg" else "volume" if unit == "l" else "count"
+    request_scale = {
+        "kg": ("mass", 1.0), "kgm": ("mass", 1.0), "g": ("mass", 0.001), "grm": ("mass", 0.001),
+        "gram": ("mass", 0.001), "grams": ("mass", 0.001),
+        "l": ("volume", 1.0), "ltr": ("volume", 1.0), "liter": ("volume", 1.0), "liters": ("volume", 1.0),
+        "litre": ("volume", 1.0), "litres": ("volume", 1.0), "dl": ("volume", 0.1),
+        "cl": ("volume", 0.01), "ml": ("volume", 0.001), "mlt": ("volume", 0.001),
+    }.get(requested_unit.casefold(), ("count", 1.0))
+    if request_scale[0] == dimension:
+        requested_base = requested_quantity * request_scale[1]
+        status = "to cover" if delivered >= requested_base else "currently quoted against"
+        return f"{packs} {pack_word} = {delivered:g} {unit} {status} your {requested_quantity:g} {requested_unit} request."
+    return f"{packs} {pack_word} quoted for your requested {requested_quantity:g} {requested_unit}."
+
+
 st.markdown('<p class="eyebrow">Valio Aimo · Junction 2026</p>', unsafe_allow_html=True)
 st.title("Purchasing overview")
 st.caption("Search products, request quotes, chat about a purchase, and configure a mock reorder rule.")
@@ -281,7 +308,8 @@ with chat_tab:
                                         }
                                         reply = (
                                             f'Claude matched "{selected_product["displayName"]}" to your request. '
-                                            f'{quote_summary(quote)}'
+                                            f'{quote_summary(quote)} '
+                                            f'{quote_delivery_summary(quote, selection, selected_product, quantity, unit)}'
                                         )
                                 except DataServiceError as exc:
                                     reply = f"I could not retrieve a quote: {exc}"

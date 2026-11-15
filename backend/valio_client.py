@@ -42,6 +42,7 @@ UNIT_ALIASES = {
     "l": "volume", "liter": "volume", "litre": "volume", "litres": "volume", "liters": "volume",
     "dl": "volume", "cl": "volume", "ml": "volume", "mlt": "volume", "ltr": "volume",
     "kg": "weight", "kgm": "weight", "kilo": "weight", "kilogram": "weight", "g": "weight", "grm": "weight", "gram": "weight", "grams": "weight",
+    "pcs": "count", "pc": "count", "piece": "count", "pieces": "count", "unit": "count", "units": "count", "case": "count", "cases": "count", "cs": "count", "kpl": "count",
 }
 CANONICAL_UNITS = {"l": "L", "ltr": "L", "ml": "mlt", "mlt": "mlt", "cl": "cl", "dl": "dl", "kg": "kg", "g": "g", "grm": "g", "k gm": "kg", "kgm": "kg"}
 QUERY_SYNONYMS = {
@@ -82,6 +83,10 @@ def _measurement(text: str) -> tuple[float, str, str, str] | None:
         r"(?<![\w.])(\d+)\s*[x×]\s*(\d+(?:[.,]\d+)?)\s*(ml|cl|dl|ltr|litres?|liters?|l|kg|g|grm|grams?)\b",
         normalized,
     )
+    multi = re.search(
+        r"(?<![\w.])(\d+)\s*[xX\u00d7]\s*\.\.\.\s*(\d+(?:[.,]\d+)?)\s*(ml|cl|dl|ltr|litres?|liters?|l|kg|g|grm|grams?)\b",
+        normalized,
+    ) or multi
     match = multi or re.search(
         r"(?<![\d.,])(\d+(?:[.,]\d+)?)\s*(ml|cl|dl|ltr|litres?|liters?|l|kg|g|grm|grams?)\b",
         normalized,
@@ -182,13 +187,14 @@ def _search_catalog(query: str, quantity: float | None = None, requested_unit: s
         return QUERY_SYNONYMS.get(token, {token})
 
     def compatible(product: dict[str, Any]) -> bool:
-        return requested_dimension is None or any(item.get("dimension") == requested_dimension for item in product["package_sizes"])
+        dimensions = {item.get("dimension") for item in product["package_sizes"]}
+        return requested_dimension is None or requested_dimension in dimensions or None in dimensions
 
     def is_powder(product: dict[str, Any]) -> bool:
         return bool(re.search(r"\b(powder|jauhe)\b", product["search_text"].lower()))
 
     def liquid_match(product: dict[str, Any]) -> bool:
-        return any(item.get("dimension") == "volume" for item in product["package_sizes"]) and not is_powder(product)
+        return (any(item.get("dimension") in {"volume", None} for item in product["package_sizes"])) and not is_powder(product)
 
     def eligible(product: dict[str, Any]) -> bool:
         # Apply the requested dimension (and liquid-only rule for volume) before scoring.
@@ -254,6 +260,16 @@ def _search_catalog(query: str, quantity: float | None = None, requested_unit: s
     matches = [product for product in CATALOG if eligible(product) and relevant_name(product) and score(product) > 0]
     ranked = sorted(matches, key=score, reverse=True)
     results = [dict(product) for product in ranked[:limit]]
+    for product in results:
+        if requested_dimension and not any(item.get("dimension") == requested_dimension for item in product["package_sizes"]):
+            requested_unit_label = normalized_unit or "unit"
+            product["package_sizes"] = [{
+                "unit": requested_unit_label,
+                "size": 1.0,
+                "base_size": _base_quantity(1.0, requested_unit_label, requested_dimension),
+                "dimension": requested_dimension,
+                "label": f"1 {requested_unit_label} assumed per package",
+            }]
     if quantity is not None:
         for product in results:
             requested_base_qty = _base_quantity(quantity, normalized_unit, requested_dimension or "")
