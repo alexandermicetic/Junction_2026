@@ -228,7 +228,7 @@ def _search_catalog(query: str, quantity: float | None = None, requested_unit: s
     # Apply requested dimensions before scoring so incompatible products never compete.
     matches = [product for product in CATALOG if eligible(product) and relevant_name(product) and score(product) > 0]
     ranked = sorted(matches, key=score, reverse=True)
-    results = ranked[:limit]
+    results = [dict(product) for product in ranked[:limit]]
     if quantity is not None:
         for product in results:
             requested_base_qty = _base_quantity(quantity, normalized_unit, requested_dimension or "")
@@ -261,9 +261,22 @@ class ValioClient:
 
     async def build_quote(self, request_items: list[QuoteItemRequest], buyer_id: str) -> list[QuotedProduct]:
         """Search locally, then query price and availability only for the top matches."""
-        selected: list[dict[str, Any]] = []
+        candidates_by_request: list[list[dict[str, Any]]] = []
         for request_item in request_items:
-            selected.extend(_search_catalog(request_item.product_query, request_item.quantity, request_item.unit))
+            if request_item.product_id:
+                # An explicit selection must resolve to that exact SKU; search the
+                # complete locally eligible result set so ranking cannot displace it.
+                candidates = _search_catalog(
+                    request_item.product_query, request_item.quantity, request_item.unit,
+                    limit=len(CATALOG),
+                )
+                candidates = [item for item in candidates if item["sku"] == request_item.product_id]
+                if not candidates:
+                    raise ValueError("The selected product ID does not match the requested product or unit")
+            else:
+                candidates = _search_catalog(request_item.product_query, request_item.quantity, request_item.unit)
+            candidates_by_request.append(candidates)
+        selected = [candidate for candidates in candidates_by_request for candidate in candidates]
         unique = {item["sku"]: item for item in selected}
         shortlisted = list(unique.values())[:10]
         if not shortlisted:
@@ -275,8 +288,10 @@ class ValioClient:
         prices = {str(item["productId"]): item for item in price_data.get("products", [])}
         availability = {str(item["productId"]): item for item in availability_data.get("products", [])}
         result: list[QuotedProduct] = []
-        for request_item in request_items:
-            candidates = [item for item in shortlisted if request_item.product_query.lower() in item["name"].lower()] or shortlisted
+        shortlisted_by_sku = {item["sku"]: item for item in shortlisted}
+        for request_item, request_candidates in zip(request_items, candidates_by_request):
+            # Work only with results from this request's own lexical/unit-compatible shortlist.
+            candidates = [shortlisted_by_sku[item["sku"]] for item in request_candidates if item["sku"] in shortlisted_by_sku]
             requested_dimension = UNIT_ALIASES.get(request_item.unit.lower())
             remaining = _base_quantity(request_item.quantity, request_item.unit, requested_dimension or "")
             for candidate in candidates:

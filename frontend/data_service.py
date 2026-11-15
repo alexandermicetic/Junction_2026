@@ -98,25 +98,67 @@ def _product_name(product: dict[str, Any]) -> str:
     )
 
 
-def get_products(query: str = "", limit: int = 100) -> list[dict[str, Any]]:
-    """Search local product records by name, brand, supplier, or product code."""
-    needle = query.strip().casefold()
-    results: list[dict[str, Any]] = []
+def _unit_dimension(unit: str) -> str | None:
+    normalized = unit.casefold().strip()
+    if normalized in {"l", "liter", "litre", "litres", "liters", "dl", "cl", "ml", "mlt", "ltr"}:
+        return "volume"
+    if normalized in {"kg", "kgm", "kilo", "kilogram", "g", "grm", "gram", "grams"}:
+        return "weight"
+    if normalized in {"pcs", "pc", "piece", "pieces", "unit", "units", "kpl"}:
+        return "count"
+    return None
+
+
+def _product_search_text(product: dict[str, Any]) -> tuple[str, str]:
+    synkka = product.get("synkkaData") or {}
+    names = [str(item.get("value", "")) for item in synkka.get("names", []) if item.get("value")]
+    primary_name = _product_name(product)
+    identity = " ".join([str(product.get("id", "")), str(product.get("vendorName", "")), str(synkka.get("brand", "")), str(product.get("category", "")), *names]).casefold()
+    return primary_name, identity
+
+
+def _catalog_score(product: dict[str, Any], query: str, requested_unit: str | None) -> int | None:
+    name, searchable = _product_search_text(product)
+    tokens = [token for token in query.casefold().replace("-", " ").split() if token]
+    if not tokens:
+        return 0
+    # Requiring every meaningful query term prevents broad substring hits such as
+    # "milk" matching "milk chocolate" when the product is a derivative.
+    searchable_words = set(searchable.replace("-", " ").replace("/", " ").split())
+    if any(token not in searchable_words and token not in searchable for token in tokens):
+        return None
+    score = sum(100 if token in name.casefold().split() else 35 for token in tokens)
+    if query.casefold() in name.casefold():
+        score += 100
+    modifiers = {"chocolate", "suklaa", "powder", "jauhe", "coconut", "kookos", "oat", "kaura", "soy", "soija", "almond", "manteli", "rice", "riisi"}
+    extras = modifiers.intersection(searchable_words).difference(tokens)
+    score -= 120 * len(extras)
+
+    wanted = _unit_dimension(requested_unit or "")
+    if wanted:
+        synkka = product.get("synkkaData") or {}
+        unit_text = " ".join([
+            str(product.get("baseUnit", "")), str(product.get("salesUnit", "")),
+            json.dumps(synkka.get("unitConversions", []), ensure_ascii=False),
+            " ".join(str(item.get("value", "")) for item in synkka.get("names", [])),
+        ]).casefold()
+        has_volume = any(mark in unit_text for mark in ("litre", "liter", " l ", "ml", "cl", "dl", "ltr"))
+        has_weight = any(mark in unit_text for mark in ("kg", "kilogram", "gram", " grm", " g "))
+        has_count = any(mark in unit_text for mark in ("pcs", "piece", "unit", "kpl"))
+        compatible = {"volume": has_volume, "weight": has_weight, "count": has_count}.get(wanted, False)
+        score += 250 if compatible else -250
+    return score
+
+
+def get_products(query: str = "", limit: int = 100, requested_unit: str | None = None) -> list[dict[str, Any]]:
+    """Search local records and rank lexical and unit-compatible matches first."""
+    results: list[tuple[int, dict[str, Any]]] = []
     for product in _products():
-        searchable = " ".join(
-            [
-                str(product.get("id", "")),
-                str(product.get("vendorName", "")),
-                str((product.get("synkkaData") or {}).get("brand", "")),
-                _product_name(product),
-            ]
-        ).casefold()
-        if needle and needle not in searchable:
-            continue
-        results.append({**product, "displayName": _product_name(product)})
-        if len(results) >= max(1, limit):
-            break
-    return results
+        score = _catalog_score(product, query, requested_unit)
+        if score is not None:
+            results.append((score, {**product, "displayName": _product_name(product)}))
+    results.sort(key=lambda item: item[0], reverse=True)
+    return [product for _, product in results[:max(1, limit)]]
 
 
 def create_quote(
@@ -125,6 +167,7 @@ def create_quote(
     quantity: float,
     unit: str,
     max_delivery_date: str,
+    product_id: str | None = None,
 ) -> dict[str, Any]:
     """Request a quote using backend/schemas.py request fields."""
     return _request_json(
@@ -135,6 +178,7 @@ def create_quote(
             "items": [
                 {
                     "product_query": product_query,
+                    "product_id": product_id,
                     "quantity": quantity,
                     "unit": unit,
                     "max_delivery_date": max_delivery_date,

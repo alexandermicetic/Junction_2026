@@ -17,7 +17,7 @@ from data_service import (
     get_products,
     update_guardrails,
 )
-from llm_service import LLMServiceError, get_chat_response
+from llm_service import LLMServiceError, get_chat_response, select_catalog_product
 
 st.set_page_config(page_title="Valio Aimo | Purchasing", page_icon="🥛", layout="wide")
 st.markdown(
@@ -137,6 +137,7 @@ with search_tab:
                     quantity=quantity,
                     unit=unit,
                     max_delivery_date=due_date.isoformat(),
+                    product_id=str(selected["id"]),
                 )
                 st.session_state["catalog_quote"] = quote
                 st.session_state["catalog_quote_request_key"] = request_key
@@ -150,10 +151,6 @@ with search_tab:
             else None
         )
         if quote:
-            st.warning(
-                "The current backend returns fixed demo milk items regardless of the requested product. "
-                "Review the returned names before relying on this quote."
-            )
             quote_cols = st.columns(3)
             quote_cols[0].metric("Quote total", f'€{quote["total_eur"]:,.2f}')
             quote_cols[1].metric(
@@ -234,7 +231,7 @@ with chat_tab:
                             reply = "Please provide a delivery date that is today or later."
                         else:
                             try:
-                                matches = get_products(product_query, limit=5)
+                                matches = get_products(product_query, limit=12, requested_unit=unit)
                             except (OSError, ValueError) as exc:
                                 matches = []
                                 reply = f"I could not search the product catalog: {exc}"
@@ -249,28 +246,46 @@ with chat_tab:
                                     )
                             else:
                                 try:
-                                    quote = create_quote(
-                                        buyer_id="restaurant-001",
+                                    selection = select_catalog_product(
                                         product_query=product_query,
-                                        quantity=quantity,
                                         unit=unit,
-                                        max_delivery_date=due_date.isoformat(),
+                                        candidates=matches,
                                     )
-                                    st.session_state["chat_quote"] = quote
-                                    st.session_state["chat_quote_context"] = {
-                                        "query": product_query,
-                                        "quantity": quantity,
-                                        "unit": unit,
-                                        "date": due_date.isoformat(),
-                                        "matches": [item["displayName"] for item in matches],
-                                    }
-                                    reply = (
-                                        f'I found {len(matches)} catalog match(es), including '
-                                        f'"{matches[0]["displayName"]}". {quote_summary(quote)} '
-                                        "The quote endpoint currently returns fixed demo milk items, so check that they match your request."
+                                    selected_id = selection["product_id"]
+                                    selected_product = next(
+                                        (product for product in matches if str(product.get("id")) == selected_id),
+                                        None,
                                     )
+                                    if selected_id == "__none__" or selected_product is None:
+                                        reply = (
+                                            f'I found catalog records related to "{product_query}", but none '
+                                            "could be confirmed as the requested product and unit. Please refine the product name."
+                                        )
+                                    else:
+                                        quote = create_quote(
+                                            buyer_id="restaurant-001",
+                                            product_query=selected_product["displayName"],
+                                            quantity=quantity,
+                                            unit=unit,
+                                            max_delivery_date=due_date.isoformat(),
+                                            product_id=selected_id,
+                                        )
+                                        st.session_state["chat_quote"] = quote
+                                        st.session_state["chat_quote_context"] = {
+                                            "query": product_query,
+                                            "quantity": quantity,
+                                            "unit": unit,
+                                            "date": due_date.isoformat(),
+                                            "selected_product": selected_product["displayName"],
+                                        }
+                                        reply = (
+                                            f'Claude matched "{selected_product["displayName"]}" to your request. '
+                                            f'{quote_summary(quote)}'
+                                        )
                                 except DataServiceError as exc:
                                     reply = f"I could not retrieve a quote: {exc}"
+                                except LLMServiceError as exc:
+                                    reply = str(exc)
             except LLMServiceError as exc:
                 reply = str(exc)
 
@@ -306,7 +321,7 @@ with reorder_tab:
     st.caption(
         "The backend has no inventory feed or background scheduler yet. This frontend-only prototype "
         "lets you configure a rule and simulate a stock update; it cannot monitor stock while the app is closed. "
-        "The quote endpoint also returns fixed demo milk lines for every product request."
+        "The quote endpoint uses the selected local catalog product ID."
     )
     try:
         guardrails = get_guardrails()
