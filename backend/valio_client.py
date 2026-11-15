@@ -17,8 +17,12 @@ load_dotenv(BACKEND_DIR / ".env")
 
 
 def _api_url(base_url: str, path: str) -> str:
-    """Join a configured base URL and API path without duplicating /api."""
+    """Join the API root and endpoint, accepting the health-check URL as config too."""
     base = base_url.rstrip("/")
+    if base.endswith("/api/ping"):
+        base = base[:-len("/ping")]
+    elif base.endswith("/ping"):
+        base = base[:-len("/ping")]
     normalized_path = "/" + path.lstrip("/")
     if base.endswith("/api") and normalized_path.startswith("/api/"):
         normalized_path = normalized_path[4:]
@@ -243,7 +247,7 @@ class ValioClient:
     """Client that performs at most two on-demand requests for shortlisted products."""
 
     def __init__(self) -> None:
-        self.base_url = os.getenv("VALIO_BASE_URL", "").rstrip("/")
+        self.base_url = os.getenv("VALIO_BASE_URL", "").strip().rstrip("/")
         self.api_key = os.getenv("VALIO_API_KEY", "")
         if not self.base_url or not self.api_key:
             raise RuntimeError("VALIO_BASE_URL and VALIO_API_KEY must be configured in backend/.env")

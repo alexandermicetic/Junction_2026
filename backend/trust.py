@@ -8,6 +8,16 @@ import jwt
 from dotenv import load_dotenv
 from fastapi import HTTPException
 
+# The unrelated PyPI package named ``jwt`` also installs an importable ``jwt``
+# module, but it does not provide PyJWT's encode/decode API. Fail at startup with
+# a useful hint instead of returning a 500 when the first quote is signed.
+if not callable(getattr(jwt, "encode", None)) or not callable(getattr(jwt, "decode", None)):
+    raise ImportError(
+        "The imported 'jwt' module is not PyJWT. In the Python environment used "
+        "to run the backend, run: python -m pip uninstall jwt && "
+        "python -m pip install --force-reinstall PyJWT"
+    )
+
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 

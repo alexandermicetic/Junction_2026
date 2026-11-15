@@ -3,5 +3,5 @@ uvicorn
 pydantic
 httpx
 python-dotenv
-pyjwt
+PyJWT>=2.8,<3
 mcp[cli]<2
