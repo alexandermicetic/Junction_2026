@@ -150,8 +150,8 @@ def _catalog_score(product: dict[str, Any], query: str, requested_unit: str | No
         score += 250 if compatible else -250
     if wanted == "weight" and quantity is not None and quantity >= 20:
         measurements = " ".join(str(item.get("value", "")) for item in (product.get("synkkaData") or {}).get("names", []))
-        multi = re.search(r"(?<![\w.])(\d+)\s*[xX×]\s*(\d+(?:[.,]\d+)?)\s*(kgm|kg|g|grm|grams?)\b", measurements, re.IGNORECASE)
-        single = multi or re.search(r"(?<![\w.])(\d+(?:[.,]\d+)?)\s*(kg|g|grm|grams?)\b", measurements, re.IGNORECASE)
+        multi = re.search(r"(?<![\w.])(\d+)\s*[xX×]\s*(?:[eE]\s*)?(\d+(?:[.,]\d+)?)\s*(kgm|kg|g|grm|grams?)\b", measurements, re.IGNORECASE)
+        single = multi or re.search(r"(?<![\w.])(?:[eE]\s*)?(\d+(?:[.,]\d+)?)\s*(kgm|kg|g|grm|grams?)\b", measurements, re.IGNORECASE)
         if single:
             multiplier = int(multi.group(1)) if multi else 1
             amount = float((multi.group(2) if multi else single.group(1)).replace(",", "."))

@@ -50,10 +50,10 @@ def quote_delivery_summary(
 ) -> str:
     """Explain the actual quoted pack count and its total measurable contents."""
     packs = sum(int(item.get("quantity", 0)) for item in quote.get("items", []))
-    pack_size = float(selection.get("total_pack_size", 1))
     unit = str(selection.get("pack_unit", requested_unit))
+    pack_size = float(selection.get("pack_size_kg") if unit == "kg" else selection.get("total_pack_size", 1))
     delivered = packs * pack_size
-    sales_unit = str(selected_product.get("salesUnit", "")).strip().casefold()
+    sales_unit = str(selection.get("orderable_unit") or selected_product.get("salesUnit", "")).strip().casefold()
     pack_word = "case" if sales_unit in {"cs", "case", "cases"} else "package"
     if packs != 1:
         pack_word += "s"

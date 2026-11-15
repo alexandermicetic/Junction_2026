@@ -87,7 +87,15 @@ def _measurement(text: str) -> tuple[float, str, str, str] | None:
         r"(?<![\w.])(\d+)\s*[xX\u00d7]\s*\.\.\.\s*(\d+(?:[.,]\d+)?)\s*(ml|cl|dl|ltr|litres?|liters?|l|kg|g|grm|grams?)\b",
         normalized,
     ) or multi
-    match = multi or re.search(
+    multi = re.search(
+        r"(?<![\w.])(\d+)\s*[xX\u00d7]\s*(?:[eE]\s*)?(\d+(?:[.,]\d+)?)\s*(ml|cl|dl|ltr|litres?|liters?|l|kg|g|grm|grams?)\b",
+        normalized,
+    ) or multi
+    single = re.search(
+        r"(?<![\w.])(?:[eE]\s*)?(\d+(?:[.,]\d+)?)\s*(ml|cl|dl|ltr|litres?|liters?|l|kg|g|grm|grams?)\b",
+        normalized,
+    )
+    match = multi or single or re.search(
         r"(?<![\d.,])(\d+(?:[.,]\d+)?)\s*(ml|cl|dl|ltr|litres?|liters?|l|kg|g|grm|grams?)\b",
         normalized,
     )
@@ -135,6 +143,25 @@ def _product_measurement(product: dict[str, Any], names: list[dict[str, Any]]) -
     return None
 
 
+def _case_weight(product: dict[str, Any]) -> tuple[float, str] | None:
+    """Get an orderable case weight from catalog conversion metadata, in kg."""
+    conversions = product.get("synkkaData", {}).get("unitConversions", [])
+    for conversion in conversions:
+        for field in ("netWeight", "grossWeight"):
+            measure = conversion.get(field) or {}
+            if not measure.get("value"):
+                continue
+            source_unit = str(measure.get("unit", "g")).lower()
+            if UNIT_ALIASES.get(source_unit) != "weight":
+                continue
+            value = float(measure["value"])
+            weight_kg = _base_quantity(value, source_unit, "weight")
+            if weight_kg > 0:
+                package_type = str(conversion.get("synkkaPackagingType") or "case").casefold()
+                return weight_kg, package_type
+    return None
+
+
 def _catalog_product(product: dict[str, Any]) -> dict[str, Any]:
     synkka = product.get("synkkaData", {})
     names = synkka.get("names", [])
@@ -143,6 +170,7 @@ def _catalog_product(product: dict[str, Any]) -> dict[str, Any]:
     allergens = _text_values(classifications.get("allergen", []))
     measurement = _product_measurement(product, names)
     package_sizes = ([{"unit": measurement[1], "size": measurement[0], "base_size": _base_quantity(measurement[0], measurement[1], measurement[2]), "dimension": measurement[2], "label": measurement[3]}] if measurement else [])
+    case_weight = _case_weight(product)
     names_text = " ".join(str(item.get("value", "")) for item in names)
     search_text = " ".join([
         str(item.get("value", "")) for item in names
@@ -155,6 +183,8 @@ def _catalog_product(product: dict[str, Any]) -> dict[str, Any]:
         "brand": str(synkka.get("brand") or ""),
         "manufacturer": str(product.get("vendorName") or ""),
         "package_sizes": package_sizes or [{"unit": product.get("baseUnit", "unit"), "size": 1.0}],
+        "case_weight_kg": case_weight[0] if case_weight else None,
+        "case_label": case_weight[1] if case_weight else "case",
         "allergens": allergens,
         "sustainability_labels": labels,
         "search_text": search_text + " " + str(synkka.get("brand", "")) + " " + str(product.get("vendorName", "")),
@@ -188,6 +218,8 @@ def _search_catalog(query: str, quantity: float | None = None, requested_unit: s
 
     def compatible(product: dict[str, Any]) -> bool:
         dimensions = {item.get("dimension") for item in product["package_sizes"]}
+        if requested_dimension == "weight" and product.get("case_weight_kg"):
+            return True
         return requested_dimension is None or requested_dimension in dimensions or None in dimensions
 
     def is_powder(product: dict[str, Any]) -> bool:
@@ -248,7 +280,7 @@ def _search_catalog(query: str, quantity: float | None = None, requested_unit: s
             ):
                 score_value += 35
         if requested_dimension == "weight" and quantity is not None and quantity >= 20:
-            size = max((item.get("base_size", 0) for item in product["package_sizes"] if item.get("dimension") == "weight"), default=0)
+            size = product.get("case_weight_kg") or max((item.get("base_size", 0) for item in product["package_sizes"] if item.get("dimension") == "weight"), default=0)
             is_multipack = any(" x " in item.get("label", "") for item in product["package_sizes"])
             if 2 <= size <= 10:
                 score_value += 120 if is_multipack else 180
@@ -261,6 +293,13 @@ def _search_catalog(query: str, quantity: float | None = None, requested_unit: s
     ranked = sorted(matches, key=score, reverse=True)
     results = [dict(product) for product in ranked[:limit]]
     for product in results:
+        if requested_dimension == "weight" and product.get("case_weight_kg"):
+            size = float(product["case_weight_kg"])
+            label = str(product.get("case_label", "case"))
+            product["package_sizes"] = [{
+                "unit": "kg", "size": size, "base_size": size,
+                "dimension": "weight", "label": f"{size:g} kg {label}",
+            }]
         if requested_dimension and not any(item.get("dimension") == requested_dimension for item in product["package_sizes"]):
             requested_unit_label = normalized_unit or "unit"
             product["package_sizes"] = [{
