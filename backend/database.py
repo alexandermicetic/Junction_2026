@@ -1,14 +1,27 @@
-"""SQLite persistence for guardrails, orders, audit logs, and inventory rules."""
+"""PostgreSQL persistence with a local SQLite fallback."""
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:  # Keep SQLite usable when optional PostgreSQL dependency is absent.
+    psycopg = None
+    dict_row = None
+
 from schemas import AuditLogEntry, GuardrailsConfig, InventoryRule, OrderResponse, QuotedProduct
 
 DB_PATH = Path(__file__).resolve().parent / "valio_gateway.db"
+load_dotenv(Path(__file__).resolve().parent / ".env")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+_ACTIVE_BACKEND = "sqlite"
 DEFAULT_GUARDRAILS = GuardrailsConfig(max_autonomous_spend_eur=500.0, forbidden_allergens=["lactose"], allow_substitutions=True)
 DEFAULT_INVENTORY = [
     {"sku": "460825", "name": "Oatly Oat Drink Organic 1L", "product_query": "Oatly Oat Drink Organic 1L", "unit": "PCS", "current_stock": 7, "min_threshold": 8, "reorder_quantity": 24, "auto_reorder_enabled": True, "buyer_id": "BUYER-TEST-001"},
@@ -17,30 +30,109 @@ DEFAULT_INVENTORY = [
 ]
 
 
-def _connect() -> sqlite3.Connection:
+class _Connection:
+    """Small DB-API compatibility layer for the existing SQLite SQL statements."""
+
+    def __init__(self, connection: Any, backend: str):
+        self.connection = connection
+        self.backend = backend
+
+    def __enter__(self):
+        self.connection.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            return self.connection.__exit__(exc_type, exc, tb)
+        finally:
+            self.connection.close()
+
+    def execute(self, sql: str, params: Any = ()):
+        if self.backend == "sqlite":
+            return self.connection.execute(sql, params)
+        sql = sql.replace("INSERT OR IGNORE INTO", "INSERT INTO")
+        sql = sql.replace("?", "%s").replace("MAX(0, current_stock-%s)", "GREATEST(0, current_stock-%s)")
+        if "INSERT INTO inventory_rules" in sql or "INSERT INTO inventory_reorder_locks" in sql:
+            sql += " ON CONFLICT DO NOTHING"
+        if sql.startswith("INSERT OR REPLACE INTO orders"):
+            sql = sql.replace("INSERT OR REPLACE INTO orders", "INSERT INTO orders")
+            sql += " ON CONFLICT (order_id) DO UPDATE SET status=EXCLUDED.status, total_eur=EXCLUDED.total_eur, blocked_reasons_json=EXCLUDED.blocked_reasons_json, items_json=EXCLUDED.items_json, quote_token=EXCLUDED.quote_token, created_at=EXCLUDED.created_at"
+        return self.connection.execute(sql, params)
+
+    def executemany(self, sql: str, params: Any):
+        if self.backend == "sqlite":
+            return self.connection.executemany(sql, params)
+        sql = sql.replace("INSERT OR IGNORE INTO", "INSERT INTO").replace("?", "%s")
+        if "INSERT INTO inventory_rules" in sql:
+            sql += " ON CONFLICT DO NOTHING"
+        return self.connection.cursor().executemany(sql, params)
+
+
+def _connect() -> _Connection:
+    if _ACTIVE_BACKEND == "postgres":
+        connection = psycopg.connect(DATABASE_URL, sslmode="require", row_factory=dict_row)
+        return _Connection(connection, "postgres")
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
-    return connection
+    return _Connection(connection, "sqlite")
 
 
 def init_db() -> None:
     """Create tables and seed the default guardrails exactly once."""
+    global _ACTIVE_BACKEND
+    if DATABASE_URL and psycopg is not None:
+        _ACTIVE_BACKEND = "postgres"
+        try:
+            _initialize_tables()
+            return
+        except Exception:
+            # Startup connectivity or schema failure must leave the local demo usable.
+            _ACTIVE_BACKEND = "sqlite"
+    _initialize_tables()
+
+
+def _initialize_tables() -> None:
     with _connect() as db:
-        db.executescript("""
-        CREATE TABLE IF NOT EXISTS guardrails (id INTEGER PRIMARY KEY CHECK (id = 1), max_autonomous_spend_eur REAL NOT NULL, forbidden_allergens TEXT NOT NULL, allow_substitutions INTEGER NOT NULL);
-        CREATE TABLE IF NOT EXISTS orders (order_id TEXT PRIMARY KEY, status TEXT NOT NULL, total_eur REAL NOT NULL, blocked_reasons_json TEXT NOT NULL, items_json TEXT NOT NULL, quote_token TEXT NOT NULL, created_at TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT NOT NULL, timestamp TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, reasoning TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS inventory_rules (sku TEXT PRIMARY KEY, name TEXT NOT NULL, product_query TEXT NOT NULL, unit TEXT NOT NULL DEFAULT 'PCS', current_stock INTEGER NOT NULL CHECK (current_stock >= 0), min_threshold INTEGER NOT NULL CHECK (min_threshold >= 0), reorder_quantity INTEGER NOT NULL CHECK (reorder_quantity > 0), auto_reorder_enabled INTEGER NOT NULL DEFAULT 1, buyer_id TEXT NOT NULL DEFAULT 'BUYER-TEST-001');
-        CREATE TABLE IF NOT EXISTS inventory_reorder_locks (sku TEXT PRIMARY KEY, locked_at TEXT NOT NULL);
-        """)
-        db.execute("INSERT OR IGNORE INTO guardrails VALUES (1, 500.0, ?, 1)", (json.dumps(["lactose"]),))
+        if _ACTIVE_BACKEND == "postgres":
+            statements = [
+                "CREATE TABLE IF NOT EXISTS guardrails (id INTEGER PRIMARY KEY CHECK (id = 1), max_autonomous_spend_eur DOUBLE PRECISION NOT NULL, forbidden_allergens TEXT NOT NULL, allow_substitutions SMALLINT NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS orders (order_id TEXT PRIMARY KEY, status TEXT NOT NULL, total_eur DOUBLE PRECISION NOT NULL, blocked_reasons_json TEXT NOT NULL, items_json TEXT NOT NULL, quote_token TEXT NOT NULL, created_at TEXT NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS audit_logs (id BIGSERIAL PRIMARY KEY, order_id TEXT NOT NULL, timestamp TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, reasoning TEXT NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS inventory_rules (sku TEXT PRIMARY KEY, name TEXT NOT NULL, product_query TEXT NOT NULL, unit TEXT NOT NULL DEFAULT 'PCS', current_stock INTEGER NOT NULL CHECK (current_stock >= 0), min_threshold INTEGER NOT NULL CHECK (min_threshold >= 0), reorder_quantity INTEGER NOT NULL CHECK (reorder_quantity > 0), auto_reorder_enabled SMALLINT NOT NULL DEFAULT 1, buyer_id TEXT NOT NULL DEFAULT 'BUYER-TEST-001')",
+                "CREATE TABLE IF NOT EXISTS inventory_reorder_locks (sku TEXT PRIMARY KEY, locked_at TEXT NOT NULL)",
+            ]
+            for statement in statements:
+                db.execute(statement)
+        else:
+            db.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS guardrails (id INTEGER PRIMARY KEY CHECK (id = 1), max_autonomous_spend_eur REAL NOT NULL, forbidden_allergens TEXT NOT NULL, allow_substitutions INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS orders (order_id TEXT PRIMARY KEY, status TEXT NOT NULL, total_eur REAL NOT NULL, blocked_reasons_json TEXT NOT NULL, items_json TEXT NOT NULL, quote_token TEXT NOT NULL, created_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT NOT NULL, timestamp TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, reasoning TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS inventory_rules (sku TEXT PRIMARY KEY, name TEXT NOT NULL, product_query TEXT NOT NULL, unit TEXT NOT NULL DEFAULT 'PCS', current_stock INTEGER NOT NULL CHECK (current_stock >= 0), min_threshold INTEGER NOT NULL CHECK (min_threshold >= 0), reorder_quantity INTEGER NOT NULL CHECK (reorder_quantity > 0), auto_reorder_enabled INTEGER NOT NULL DEFAULT 1, buyer_id TEXT NOT NULL DEFAULT 'BUYER-TEST-001');
+            CREATE TABLE IF NOT EXISTS inventory_reorder_locks (sku TEXT PRIMARY KEY, locked_at TEXT NOT NULL);
+            """)
+        if _ACTIVE_BACKEND == "postgres":
+            db.execute("INSERT INTO guardrails VALUES (1, 500.0, ?, 1) ON CONFLICT DO NOTHING", (json.dumps(["lactose"]),))
+        else:
+            db.execute("INSERT OR IGNORE INTO guardrails VALUES (1, 500.0, ?, 1)", (json.dumps(["lactose"]),))
         _seed_inventory(db)
+
+
+def get_backend_status() -> dict[str, Any]:
+    return {"active": _ACTIVE_BACKEND, "aiven_postgresql": _ACTIVE_BACKEND == "postgres", "sqlite_fallback": _ACTIVE_BACKEND == "sqlite", "configured": bool(DATABASE_URL)}
 
 
 def _seed_inventory(db: sqlite3.Connection) -> None:
     db.executemany(
-        "INSERT OR IGNORE INTO inventory_rules (sku,name,product_query,unit,current_stock,min_threshold,reorder_quantity,auto_reorder_enabled,buyer_id) VALUES (:sku,:name,:product_query,:unit,:current_stock,:min_threshold,:reorder_quantity,:auto_reorder_enabled,:buyer_id)",
-        [{**item, "auto_reorder_enabled": int(item["auto_reorder_enabled"])} for item in DEFAULT_INVENTORY],
+        "INSERT OR IGNORE INTO inventory_rules (sku,name,product_query,unit,current_stock,min_threshold,reorder_quantity,auto_reorder_enabled,buyer_id) VALUES (?,?,?,?,?,?,?,?,?)",
+        [
+            (
+                item["sku"], item["name"], item["product_query"], item["unit"],
+                item["current_stock"], item["min_threshold"], item["reorder_quantity"],
+                int(item["auto_reorder_enabled"]), item["buyer_id"],
+            )
+            for item in DEFAULT_INVENTORY
+        ],
     )
 
 

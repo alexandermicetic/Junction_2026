@@ -15,6 +15,7 @@ from data_service import (
     get_data_status,
     get_guardrails,
     get_products,
+    get_service_status,
     update_guardrails,
 )
 from llm_service import LLMServiceError, get_chat_response, select_catalog_product
@@ -75,6 +76,18 @@ def quote_delivery_summary(
 st.markdown('<p class="eyebrow">Valio Aimo · Junction 2026</p>', unsafe_allow_html=True)
 st.title("Purchasing overview")
 st.caption("Search products, request quotes, chat about a purchase, and configure a mock reorder rule.")
+
+try:
+    connection_status = get_service_status()
+    database_status = connection_status.get("database", {})
+    status_cols = st.columns(2)
+    status_cols[0].metric(
+        "Aiven PostgreSQL",
+        "Active" if database_status.get("aiven_postgresql") else "SQLite fallback",
+    )
+    status_cols[1].metric("JWT", "Active" if connection_status.get("jwt_active") else "Not configured")
+except DataServiceError:
+    st.info("Backend connection status is unavailable. Start the backend to view service health.")
 
 status = get_data_status()
 with st.expander("Data sources", expanded=False):

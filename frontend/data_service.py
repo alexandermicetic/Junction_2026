@@ -23,6 +23,11 @@ class DataServiceError(RuntimeError):
     """Raised when a mock data source or backend API cannot be used."""
 
 
+def get_service_status() -> dict[str, Any]:
+    """Read backend connectivity indicators for the frontend status bar."""
+    return _request_json("/api/health")
+
+
 def _request_json(path: str, *, method: str = "GET", payload: dict[str, Any] | None = None) -> Any:
     body = json.dumps(payload).encode("utf-8") if payload is not None else None
     request = Request(

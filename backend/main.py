@@ -1,6 +1,7 @@
 """Valio Aimo Trusted Trade Gateway API."""
 
 from datetime import date, datetime, timedelta, timezone
+import os
 from uuid import uuid4
 
 import httpx
@@ -22,6 +23,16 @@ database.init_db()
 def now_iso() -> str:
     """Return the current UTC timestamp in ISO 8601 format."""
     return datetime.now(timezone.utc).isoformat()
+
+
+@app.get("/api/health", tags=["Health"])
+def health() -> dict:
+    """Report active persistence and JWT readiness without exposing secrets."""
+    return {
+        "status": "ok",
+        "database": database.get_backend_status(),
+        "jwt_active": bool(os.getenv("JWT_SECRET")),
+    }
 
 
 @app.post("/api/quote", response_model=QuoteResponse, tags=["Quotes"])
