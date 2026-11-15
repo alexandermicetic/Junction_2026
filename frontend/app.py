@@ -248,6 +248,7 @@ with chat_tab:
                                 try:
                                     selection = select_catalog_product(
                                         product_query=product_query,
+                                        quantity=quantity,
                                         unit=unit,
                                         candidates=matches,
                                     )
