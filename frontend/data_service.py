@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -117,7 +118,7 @@ def _product_search_text(product: dict[str, Any]) -> tuple[str, str]:
     return primary_name, identity
 
 
-def _catalog_score(product: dict[str, Any], query: str, requested_unit: str | None) -> int | None:
+def _catalog_score(product: dict[str, Any], query: str, requested_unit: str | None, quantity: float | None) -> int | None:
     name, searchable = _product_search_text(product)
     tokens = [token for token in query.casefold().replace("-", " ").split() if token]
     if not tokens:
@@ -147,14 +148,27 @@ def _catalog_score(product: dict[str, Any], query: str, requested_unit: str | No
         has_count = any(mark in unit_text for mark in ("pcs", "piece", "unit", "kpl"))
         compatible = {"volume": has_volume, "weight": has_weight, "count": has_count}.get(wanted, False)
         score += 250 if compatible else -250
+    if wanted == "weight" and quantity is not None and quantity >= 20:
+        measurements = " ".join(str(item.get("value", "")) for item in (product.get("synkkaData") or {}).get("names", []))
+        multi = re.search(r"(?<![\w.])(\d+)\s*[xX×]\s*(\d+(?:[.,]\d+)?)\s*(kgm|kg|g|grm|grams?)\b", measurements, re.IGNORECASE)
+        single = multi or re.search(r"(?<![\w.])(\d+(?:[.,]\d+)?)\s*(kg|g|grm|grams?)\b", measurements, re.IGNORECASE)
+        if single:
+            multiplier = int(multi.group(1)) if multi else 1
+            amount = float((multi.group(2) if multi else single.group(1)).replace(",", "."))
+            package_unit = multi.group(3) if multi else single.group(2)
+            package_kg = amount * multiplier * (0.001 if package_unit.casefold() in {"g", "grm", "gram", "grams"} else 1)
+            if 2 <= package_kg <= 10:
+                score += 240 if multi else 320
+            elif package_kg < 2:
+                score -= 80
     return score
 
 
-def get_products(query: str = "", limit: int = 100, requested_unit: str | None = None) -> list[dict[str, Any]]:
+def get_products(query: str = "", limit: int = 100, requested_unit: str | None = None, quantity: float | None = None) -> list[dict[str, Any]]:
     """Search local records and rank lexical and unit-compatible matches first."""
     results: list[tuple[int, dict[str, Any]]] = []
     for product in _products():
-        score = _catalog_score(product, query, requested_unit)
+        score = _catalog_score(product, query, requested_unit, quantity)
         if score is not None:
             results.append((score, {**product, "displayName": _product_name(product)}))
     results.sort(key=lambda item: item[0], reverse=True)

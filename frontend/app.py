@@ -231,7 +231,7 @@ with chat_tab:
                             reply = "Please provide a delivery date that is today or later."
                         else:
                             try:
-                                matches = get_products(product_query, limit=12, requested_unit=unit)
+                                matches = get_products(product_query, limit=12, requested_unit=unit, quantity=quantity)
                             except (OSError, ValueError) as exc:
                                 matches = []
                                 reply = f"I could not search the product catalog: {exc}"

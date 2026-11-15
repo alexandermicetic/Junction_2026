@@ -75,19 +75,37 @@ def _base_quantity(value: float, unit: str, dimension: str) -> float:
     return value
 
 
-def _measurement(text: str) -> tuple[float, str, str] | None:
-    """Extract the first real package measurement, ignoring multipack counts."""
-    match = re.search(r"(?<![\d.,])(\d+(?:[.,]\d+)?)\s*(ml|cl|dl|ltr|l|kg|g)\b", text.lower())
+def _measurement(text: str) -> tuple[float, str, str, str] | None:
+    """Read a single package or multipack and retain the full orderable size."""
+    normalized = text.lower()
+    multi = re.search(
+        r"(?<![\w.])(\d+)\s*[x×]\s*(\d+(?:[.,]\d+)?)\s*(ml|cl|dl|ltr|litres?|liters?|l|kg|g|grm|grams?)\b",
+        normalized,
+    )
+    match = multi or re.search(
+        r"(?<![\d.,])(\d+(?:[.,]\d+)?)\s*(ml|cl|dl|ltr|litres?|liters?|l|kg|g|grm|grams?)\b",
+        normalized,
+    )
     if not match:
         return None
-    value = float(match.group(1).replace(",", "."))
-    unit = match.group(2)
-    display_unit = CANONICAL_UNITS.get(unit, unit)
-    dimension = UNIT_ALIASES[unit]
-    return value, display_unit, dimension
+    multiplier = int(multi.group(1)) if multi else 1
+    value = float((multi.group(2) if multi else match.group(1)).replace(",", "."))
+    unit = multi.group(3) if multi else match.group(2)
+    unit_alias = {"liter": "l", "liters": "l", "litre": "l", "litres": "l", "gram": "g", "grams": "g", "grm": "g"}.get(unit, unit)
+    display_unit = CANONICAL_UNITS.get(unit_alias, unit_alias)
+    dimension = UNIT_ALIASES.get(unit_alias)
+    if dimension is None:
+        return None
+    total = value * multiplier
+    if not multi:
+        return total, display_unit, dimension, f"{value:g} {display_unit}"
+    base_total = _base_quantity(total, display_unit, dimension)
+    total_text = f"{base_total:g} {'kg' if dimension == 'weight' else 'L'}"
+    label = f"{multiplier} × {value:g} {display_unit} ({total_text} total)"
+    return total, display_unit, dimension, label
 
 
-def _product_measurement(product: dict[str, Any], names: list[dict[str, Any]]) -> tuple[float, str, str] | None:
+def _product_measurement(product: dict[str, Any], names: list[dict[str, Any]]) -> tuple[float, str, str, str] | None:
     """Read package size from product names/marketing and then unit-conversion fields."""
     searchable = " ".join(str(item.get("value", "")) for item in names)
     searchable += " " + " ".join(str(item.get("value", "")) for item in product.get("synkkaData", {}).get("marketingTexts", []))
@@ -108,7 +126,7 @@ def _product_measurement(product: dict[str, Any], names: list[dict[str, Any]]) -
                     numeric = float(value)
                     display_unit = "g" if source_unit in {"grm", "g"} else CANONICAL_UNITS.get(source_unit, source_unit)
                     dimension = "weight"
-                return numeric, display_unit, dimension
+                return numeric, display_unit, dimension, f"{numeric:g} {display_unit}"
     return None
 
 
@@ -119,7 +137,7 @@ def _catalog_product(product: dict[str, Any]) -> dict[str, Any]:
     labels = _text_values(classifications.get("nutritionalClaim", [])) + _text_values(classifications.get("packagingMarkedLabel", []))
     allergens = _text_values(classifications.get("allergen", []))
     measurement = _product_measurement(product, names)
-    package_sizes = ([{"unit": measurement[1], "size": measurement[0], "base_size": _base_quantity(measurement[0], measurement[1], measurement[2]), "dimension": measurement[2]}] if measurement else [])
+    package_sizes = ([{"unit": measurement[1], "size": measurement[0], "base_size": _base_quantity(measurement[0], measurement[1], measurement[2]), "dimension": measurement[2], "label": measurement[3]}] if measurement else [])
     names_text = " ".join(str(item.get("value", "")) for item in names)
     search_text = " ".join([
         str(item.get("value", "")) for item in names
@@ -223,6 +241,13 @@ def _search_catalog(query: str, quantity: float | None = None, requested_unit: s
                 or CORE_DAIRY_CATEGORY_PATTERN.search(product["category"])
             ):
                 score_value += 35
+        if requested_dimension == "weight" and quantity is not None and quantity >= 20:
+            size = max((item.get("base_size", 0) for item in product["package_sizes"] if item.get("dimension") == "weight"), default=0)
+            is_multipack = any(" x " in item.get("label", "") for item in product["package_sizes"])
+            if 2 <= size <= 10:
+                score_value += 120 if is_multipack else 180
+            elif 0 < size < 2:
+                score_value -= 40
         return score_value
 
     # Apply requested dimensions before scoring so incompatible products never compete.
@@ -233,7 +258,7 @@ def _search_catalog(query: str, quantity: float | None = None, requested_unit: s
         for product in results:
             requested_base_qty = _base_quantity(quantity, normalized_unit, requested_dimension or "")
             package = min(product["package_sizes"], key=lambda item: abs(item.get("base_size", item["size"]) - max(requested_base_qty, 1)))
-            product["package_size"] = f"{package['size']:g} {package['unit']}"
+            product["package_size"] = package.get("label", f"{package['size']:g} {package['unit']}")
             product["package_quantity"] = max(1, math.ceil(requested_base_qty / package.get("base_size", package["size"])))
     return results
 
@@ -308,7 +333,7 @@ class ValioClient:
                 if package_quantity <= 0:
                     continue
                 total = round(package_quantity * unit_price, 2)
-                result.append(QuotedProduct(sku=candidate["sku"], name=candidate["name"], package_size=f"{package['size']:g} {package['unit']}", quantity=package_quantity, unit_price_eur=unit_price, total_price_eur=total, in_stock=not availability_item.get("salesBlock", False) and available > 0, allergens=candidate["allergens"], sustainability_labels=candidate["sustainability_labels"], is_substitution=False, substitution_reason=None))
+                result.append(QuotedProduct(sku=candidate["sku"], name=candidate["name"], package_size=package.get("label", f"{package['size']:g} {package['unit']}"), quantity=package_quantity, unit_price_eur=unit_price, total_price_eur=total, in_stock=not availability_item.get("salesBlock", False) and available > 0, allergens=candidate["allergens"], sustainability_labels=candidate["sustainability_labels"], is_substitution=False, substitution_reason=None))
                 remaining -= package_quantity * package_base_qty
                 if remaining <= 0:
                     break
